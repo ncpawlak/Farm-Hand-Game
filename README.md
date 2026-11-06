@@ -24,6 +24,16 @@ Built with TypeScript + [Phaser](https://phaser.io), packaged as an installable 
 - **Crafter** (purple): moves inputs from storage to the workbench, crafts the good, and puts it in the attached bin. Tap the workshop or its bin to sell the output.
 - Farmers never deliver to workshop bins. Removing a workshop (or its bin) sells everything it holds and sends its workers home.
 
+## Conveyors & Industry
+
+- **Conveyor** ($10/tile): drag to lay a belt; the drag direction sets the flow. A belt pulls from an adjacent workshop output bin and delivers into whatever it points at (an Industry, or any bin). Tap a belt with the Conveyor tool (or *Turn* in its panel) to rotate it.
+- **Merge / split**: belts feeding one belt merge in zipper order (alternating sides). Start a drag on an existing belt to branch it; a belt with several outputs splits round-robin, skipping any blocked side.
+- Workers can't walk on belts. Crossing a path and a belt (either way round) automatically builds a **bridge** that workers walk over while items pass underneath.
+- **Industry** ($500, 2×2, brick) comes with an attached output bin and is fed only by conveyors (no hauler). Hire a crafter and pick a recipe:
+  - 🥐 **Pastry**: 2 flour → 1 in 8s, sells for $30.
+  - 🥪 **Sandwich**: 2 bread → 1 in 10s, sells for $40.
+- When an Industry's storage is full (20) or the item doesn't match its recipe, belts back up and wait.
+
 All balance numbers (costs, timings, prices, recipes, grid size) live in [`src/config.ts`](src/config.ts). Crop growth is temporarily set to **5s** for testing (normally 30s).
 
 ## Controls
@@ -31,8 +41,8 @@ All balance numbers (costs, timings, prices, recipes, grid size) live in [`src/c
 | Action | Touch | Mouse |
 | --- | --- | --- |
 | Place / select | Tap | Click |
-| Paint paths & farmland | Drag (with that tool) | Drag |
-| Pan | Drag (tools other than Farmland/Path) or two fingers | Drag (tools other than Farmland/Path) or right-drag |
+| Paint paths, belts & farmland | Drag (with that tool) | Drag |
+| Pan | Drag (tools other than Farmland/Path/Conveyor) or two fingers | Drag (tools other than Farmland/Path/Conveyor) or right-drag |
 | Zoom | Pinch | Wheel |
 
 ## Development
@@ -57,4 +67,4 @@ In dev builds, the game controller is exposed as `window.farm` for debugging.
 ## Roadmap
 
 - Transport workers carrying goods to destinations (markets, orders).
-- More crops and recipes, chained workshops, and real art.
+- More crops and recipes, and real art.

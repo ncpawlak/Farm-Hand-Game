@@ -105,14 +105,23 @@ body {
 .toolbar {
   pointer-events: auto;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  /* Tools share the row on wide screens and scroll sideways on narrow phones. */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(58px, 1fr);
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
   gap: 6px;
   background: var(--card);
   border-radius: 20px;
   padding: 6px;
   box-shadow: var(--shadow);
-  max-width: 560px;
+  max-width: 680px;
   margin: 0 auto;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .tool {

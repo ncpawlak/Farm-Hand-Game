@@ -1,8 +1,9 @@
 import * as Phaser from 'phaser';
-import { CONFIG, CROPS, ITEMS, type ItemId } from '../config';
+import { CONFIG, CROPS, ITEMS, RECIPES, type ItemId } from '../config';
+import { DIRS, dirBetween, feederSides } from '../sim/conveyor';
 import { benchSpot, storageSpot, taskProgress } from '../sim/simulate';
-import type { BinBuilding, Building, HouseBuilding, IndustryBuilding, PlotBuilding, Worker } from '../sim/types';
-import { footprintCells, stockCount, type World } from '../sim/world';
+import type { BinBuilding, Building, ConveyorBuilding, HouseBuilding, IndustryBuilding, PlotBuilding, Worker } from '../sim/types';
+import { footprintCells, stockCount, type PlaceableType, type World } from '../sim/world';
 import type { GameController } from './controller';
 
 const T = CONFIG.grid.tileSize;
@@ -47,6 +48,12 @@ const COLORS = {
   select: 0xffffff,
   ghostOk: 0x7fd67a,
   ghostBad: 0xe06a5f,
+  belt: 0x6f6862,
+  beltEdge: 0x4b4542,
+  chevron: 0xbdb5aa,
+  brick: 0xb8644c,
+  brickDark: 0x8f4a37,
+  board: 0xe2c592,
 };
 
 const TASK_COLORS: Record<string, number> = {
@@ -70,6 +77,10 @@ export class FarmScene extends Phaser.Scene {
   private pinchMid = { x: 0, y: 0 };
   private lastPaintCell = '';
   private paintFailed = false;
+  /** Conveyor drag state: the previous cell, belts laid during this drag, and whether it hit a building. */
+  private beltPrev: { x: number; y: number } | null = null;
+  private beltCreated = new Set<string>();
+  private beltStopped = false;
   private hoverCell: { x: number; y: number } | null = null;
   private minZoom = 0.3;
   private maxZoom = 3;
@@ -177,6 +188,9 @@ export class FarmScene extends Phaser.Scene {
     this.gesture = p.rightButtonDown() || p.middleButtonDown() ? 'pan' : 'pending';
     this.paintFailed = false;
     this.lastPaintCell = '';
+    this.beltPrev = null;
+    this.beltCreated.clear();
+    this.beltStopped = false;
   }
 
   private onMove(p: Phaser.Input.Pointer): void {
@@ -200,7 +214,8 @@ export class FarmScene extends Phaser.Scene {
     }
 
     if (this.gesture === 'pending' && Math.hypot(p.x - d.sx, p.y - d.sy) > 8) {
-      const paints = this.controller.tool === 'path' || this.controller.tool === 'plot';
+      const tool = this.controller.tool;
+      const paints = tool === 'path' || tool === 'plot' || tool === 'conveyor';
       this.gesture = paints ? 'paint' : 'pan';
       if (paints) this.paintAt(this.toCell(d.sx, d.sy));
     }
@@ -233,15 +248,64 @@ export class FarmScene extends Phaser.Scene {
     if (key === this.lastPaintCell) return;
     this.lastPaintCell = key;
     const tool = this.controller.tool;
+    if (tool === 'conveyor') return this.paintBelt(cell);
     if (tool !== 'path' && tool !== 'plot') return;
-    if (this.world.buildingAt(cell.x, cell.y) || !this.world.inBounds(cell.x, cell.y)) return;
+    const here = this.world.buildingAt(cell.x, cell.y);
+    const crossing = tool === 'path' && here?.type === 'conveyor' && !here.bridge;
+    if ((here && !crossing) || !this.world.inBounds(cell.x, cell.y)) return;
     const ok = this.controller.act((w) => w.place(tool, cell.x, cell.y), this.paintFailed);
     if (!ok) this.paintFailed = true;
+  }
+
+  /** Lays belts along the drag, filling any cells skipped by a fast swipe. */
+  private paintBelt(cell: { x: number; y: number }): void {
+    const prev = this.beltPrev;
+    if (!prev) return this.beltStep(cell);
+    let { x, y } = prev;
+    while ((x !== cell.x || y !== cell.y) && !this.beltStopped) {
+      if (x !== cell.x) x += Math.sign(cell.x - x);
+      else y += Math.sign(cell.y - y);
+      this.beltStep({ x, y });
+    }
+  }
+
+  private beltStep(cell: { x: number; y: number }): void {
+    if (this.beltStopped || !this.world.inBounds(cell.x, cell.y)) return;
+    const prev = this.beltPrev;
+    const key = (p: { x: number; y: number }) => p.x + ',' + p.y;
+    const replace = !!prev && this.beltCreated.has(key(prev));
+    const here = this.world.buildingAt(cell.x, cell.y);
+    if (!here || here.type === 'path') {
+      const ok = this.controller.act((w) => {
+        const placed = w.place('conveyor', cell.x, cell.y);
+        if (!placed.ok || !prev) return placed;
+        // Face forward so the end of a line feeds whatever is ahead of it.
+        const d = dirBetween(prev, cell)!;
+        w.linkConveyor(cell.x, cell.y, cell.x + DIRS[d].x, cell.y + DIRS[d].y, true);
+        w.linkConveyor(prev.x, prev.y, cell.x, cell.y, replace);
+        return placed;
+      }, this.paintFailed);
+      if (!ok) {
+        this.paintFailed = true;
+        this.beltStopped = true;
+        return;
+      }
+      this.beltCreated.add(key(cell));
+    } else if (prev) {
+      this.controller.act((w) => w.linkConveyor(prev.x, prev.y, cell.x, cell.y, replace), true);
+      // Running into a building ends the line there.
+      if (here.type !== 'conveyor') this.beltStopped = true;
+    }
+    this.beltPrev = cell;
   }
 
   private handleTap(cell: { x: number; y: number }): void {
     const tool = this.controller.tool;
     const target = this.world.buildingAt(cell.x, cell.y);
+    if (tool === 'conveyor' && target?.type === 'conveyor') {
+      this.controller.act((w) => w.rotateConveyor(target.id), true);
+      return;
+    }
     switch (tool) {
       case 'select':
         this.controller.select(target?.id ?? null);
@@ -251,12 +315,17 @@ export class FarmScene extends Phaser.Scene {
         return;
       default: {
         const anchor = this.anchorFor(tool, cell);
-        this.controller.act((w) => w.place(tool, anchor.x, anchor.y));
+        this.controller.act((w) => {
+          const placed = w.place(tool, anchor.x, anchor.y);
+          // A single tapped belt faces east; tap it again to turn it.
+          if (placed.ok && tool === 'conveyor') w.linkConveyor(cell.x, cell.y, cell.x + 1, cell.y, true);
+          return placed;
+        });
       }
     }
   }
 
-  private anchorFor(tool: 'plot' | 'path' | 'house' | 'bin' | 'industry', cell: { x: number; y: number }): { x: number; y: number } {
+  private anchorFor(tool: PlaceableType, cell: { x: number; y: number }): { x: number; y: number } {
     const off = Math.floor(CONFIG.footprints[tool] / 2);
     return { x: cell.x - off, y: cell.y - off };
   }
@@ -292,6 +361,7 @@ export class FarmScene extends Phaser.Scene {
     this.seenLabels.clear();
 
     for (const b of world.state.buildings) if (b.type === 'path') this.drawPath(b);
+    for (const b of world.state.buildings) if (b.type === 'conveyor') this.drawConveyor(b);
     for (const b of world.state.buildings) {
       if (b.type === 'plot') this.drawPlot(b);
       else if (b.type === 'house') this.drawHouse(b);
@@ -331,6 +401,71 @@ export class FarmScene extends Phaser.Scene {
     for (let i = 0; i < 3; i++) {
       const h = hash(b.x * 31 + b.y * 17 + i * 13);
       g.fillCircle(x + 8 + (h % (T - 16)), y + 8 + (hash(h) % (T - 16)), 2);
+    }
+  }
+
+  private drawConveyor(c: ConveyorBuilding): void {
+    const g = this.g;
+    const cx = c.x * T + T / 2;
+    const cy = c.y * T + T / 2;
+    const half = T * 0.28;
+    const arms = new Set([...c.outs, ...feederSides(this.world, c)]);
+    const rect = (d: number, inset: number) => {
+      const o = DIRS[d];
+      const len = T / 2;
+      const x0 = Math.min(cx, cx + o.x * len) - (o.x === 0 ? half - inset : 0);
+      const y0 = Math.min(cy, cy + o.y * len) - (o.y === 0 ? half - inset : 0);
+      const w = o.x === 0 ? (half - inset) * 2 : len;
+      const h = o.y === 0 ? (half - inset) * 2 : len;
+      return [x0, y0, w, h] as const;
+    };
+    g.fillStyle(COLORS.beltEdge, 1);
+    g.fillRoundedRect(cx - half, cy - half, half * 2, half * 2, 5);
+    for (const d of arms) g.fillRect(...rect(d, 0));
+    g.fillStyle(COLORS.belt, 1);
+    g.fillRoundedRect(cx - half + 3, cy - half + 3, half * 2 - 6, half * 2 - 6, 3);
+    for (const d of arms) g.fillRect(...rect(d, 3));
+
+    // Chevrons slide along each output.
+    g.lineStyle(2, COLORS.chevron, 0.9);
+    const shift = ((this.time.now / 1000) * CONFIG.conveyor.speed) % 1;
+    for (const d of c.outs) {
+      const o = DIRS[d];
+      for (let k = 0; k < 2; k++) {
+        const t = ((k * 0.5 + shift) % 1) * (T / 2);
+        const px = cx + o.x * t;
+        const py = cy + o.y * t;
+        const s = 5;
+        // Arrow tip points along o; wings are perpendicular.
+        g.lineBetween(px - o.x * s + o.y * s, py - o.y * s + o.x * s, px, py);
+        g.lineBetween(px - o.x * s - o.y * s, py - o.y * s - o.x * s, px, py);
+      }
+    }
+
+    if (c.bridge) {
+      g.fillStyle(COLORS.plank, 0.95);
+      g.fillRoundedRect(c.x * T + 6, c.y * T + 6, T - 12, T - 12, 4);
+      g.lineStyle(1.5, COLORS.crateDark, 0.7);
+      for (let i = 1; i < 4; i++) g.lineBetween(c.x * T + 6, c.y * T + 6 + (i * (T - 12)) / 4, c.x * T + T - 6, c.y * T + 6 + (i * (T - 12)) / 4);
+    }
+
+    if (c.item) {
+      const { p, from } = c.item;
+      let ix = cx;
+      let iy = cy;
+      if (p < 0.5 && from != null) {
+        const f = (0.5 - p) * T;
+        ix += DIRS[from].x * f;
+        iy += DIRS[from].y * f;
+      } else if (p >= 0.5 && c.outs.length) {
+        const o = DIRS[c.outs[c.nextOut % c.outs.length]];
+        ix += o.x * (p - 0.5) * T;
+        iy += o.y * (p - 0.5) * T;
+      }
+      g.fillStyle(ITEMS[c.item.id].color, 1);
+      g.lineStyle(1.5, 0x000000, 0.25);
+      g.fillRoundedRect(ix - 6, iy - 6, 12, 12, 3);
+      g.strokeRoundedRect(ix - 6, iy - 6, 12, 12, 3);
     }
   }
 
@@ -437,8 +572,13 @@ export class FarmScene extends Phaser.Scene {
 
     g.fillStyle(COLORS.shadow, 0.12);
     g.fillEllipse(x + w / 2, y + h - 4, w - 8, 14);
-    g.fillStyle(COLORS.wallWood, 1);
+    const factory = b.kind === 'industry';
+    g.fillStyle(factory ? COLORS.brick : COLORS.wallWood, 1);
     g.fillRoundedRect(x + 2, y + 2, w - 4, h - 4, 10);
+    if (factory) {
+      g.lineStyle(1, COLORS.brickDark, 0.8);
+      for (let i = 1; i < 8; i++) g.lineBetween(x + 3, y + 2 + i * 6, x + w - 3, y + 2 + i * 6);
+    }
     g.fillStyle(COLORS.floor, 1);
     g.fillRoundedRect(x + 7, y + 7, w - 14, h - 14, 7);
     g.lineStyle(1.5, COLORS.plank, 1);
@@ -458,12 +598,13 @@ export class FarmScene extends Phaser.Scene {
     g.lineBetween(sx - 18, sy + 6, sx + 18, sy + 6);
     const stored = stockCount(b.storage);
     const sacks = Math.min(9, Math.ceil((stored / CONFIG.industry.storageCapacity) * 9));
+    const sackColor = ITEMS[RECIPES[b.recipe].input].color;
     for (let i = 0; i < sacks; i++) {
       const col = i % 3;
       const row = Math.floor(i / 3);
-      g.fillStyle(COLORS.wheatDark, 1);
+      g.fillStyle(0x000000, 0.2);
       g.fillCircle(sx - 10 + col * 10, sy + 8 - row * 9, 5.5);
-      g.fillStyle(COLORS.wheat, 1);
+      g.fillStyle(sackColor, 1);
       g.fillCircle(sx - 10 + col * 10, sy + 7 - row * 9, 4);
     }
     this.label(`ind${b.id}s`, `${stored}/${CONFIG.industry.storageCapacity}`, sx, sy + 24, '11px');
@@ -482,6 +623,13 @@ export class FarmScene extends Phaser.Scene {
       g.fillCircle(bx, by - 13, 9);
       g.fillStyle(COLORS.stoneDark, 1);
       g.fillCircle(bx, by - 13, 2.5);
+    } else if (station === 'sandwich') {
+      g.fillStyle(COLORS.board, 1);
+      g.fillRoundedRect(bx - 15, by - 22, 30, 16, 4);
+      g.fillStyle(ITEMS.bread.color, 1);
+      g.fillRoundedRect(bx - 11, by - 19, 10, 9, 3);
+      g.fillStyle(ITEMS.sandwich.color, 1);
+      g.fillRoundedRect(bx + 2, by - 19, 10, 9, 3);
     } else {
       g.fillStyle(COLORS.ovenDark, 1);
       g.fillRoundedRect(bx - 13, by - 26, 26, 20, { tl: 12, tr: 12, bl: 2, br: 2 });
@@ -580,7 +728,7 @@ export class FarmScene extends Phaser.Scene {
     const a = this.anchorFor(tool, cell);
     const ok = this.world.canPlace(tool, a.x, a.y).ok;
     g.fillStyle(ok ? COLORS.ghostOk : COLORS.ghostBad, 0.35);
-    if (tool === 'industry') {
+    if (tool === 'industry' || tool === 'factory') {
       for (const c of footprintCells(tool, a.x, a.y)) g.fillRect(c.x * T, c.y * T, T, T);
     } else {
       const size = CONFIG.footprints[tool];

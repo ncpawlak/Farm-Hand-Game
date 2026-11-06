@@ -13,6 +13,10 @@ const DIRS: Point[] = [
   { x: 0, y: -1 },
 ];
 
+export function isWalkable(b: Building): boolean {
+  return b.type === 'path' || (b.type === 'conveyor' && b.bridge);
+}
+
 /**
  * Breadth-first search from `start` (a cell) along path tiles to the nearest cell
  * belonging to a building matching `isTarget`. Cells of the building with id
@@ -50,7 +54,7 @@ export function findRoute(
         prev[nIdx] = idx;
         return reconstruct(prev, nIdx, width);
       }
-      if (b.type === 'path' || b.id === sourceId) {
+      if (isWalkable(b) || b.id === sourceId) {
         prev[nIdx] = idx;
         queue.push(nIdx);
       }
@@ -104,8 +108,9 @@ export function computeConnected(grid: GridLookup, buildings: Building[]): Set<n
       if (visited[nIdx]) continue;
       const b = grid.buildingAt(nx, ny);
       if (!b) continue;
+      if (b.type === 'conveyor' && !b.bridge) continue;
       connected.add(b.id);
-      if (b.type === 'path') {
+      if (isWalkable(b)) {
         visited[nIdx] = 1;
         queue.push(nIdx);
       }

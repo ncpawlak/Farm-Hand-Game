@@ -1,7 +1,9 @@
-import type { CropId, GoodId, ItemId } from '../config';
+import type { CropId, GoodId, IndustryKind, ItemId } from '../config';
 
-export type BuildingType = 'plot' | 'path' | 'house' | 'bin' | 'industry';
+export type BuildingType = 'plot' | 'path' | 'house' | 'bin' | 'industry' | 'conveyor';
 export type PlotStage = 'untilled' | 'tilled' | 'planted' | 'ready';
+/** 0 = east, 1 = south, 2 = west, 3 = north. */
+export type Dir = 0 | 1 | 2 | 3;
 
 interface BuildingBase {
   id: number;
@@ -34,14 +36,17 @@ export interface BinBuilding extends BuildingBase {
   stock: Partial<Record<ItemId, number>>;
   /** Set when this bin is the attached output bin of a workshop. */
   industryId?: number;
+  /** Round-robin pointer over neighbouring conveyors this bin feeds. */
+  nextOut?: number;
 }
 
 export interface IndustryBuilding extends BuildingBase {
   type: 'industry';
+  kind: IndustryKind;
   /** What the workshop is set to make. */
   recipe: GoodId;
-  /** Raw goods waiting in the storage section. */
-  storage: Partial<Record<CropId, number>>;
+  /** Inputs waiting in the storage section. */
+  storage: Partial<Record<ItemId, number>>;
   /** Recipe currently on the workbench (inputs already taken from storage). */
   crafting: GoodId | null;
   binId: number;
@@ -49,7 +54,28 @@ export interface IndustryBuilding extends BuildingBase {
   haulerId: number | null;
 }
 
-export type Building = PlotBuilding | PathBuilding | HouseBuilding | BinBuilding | IndustryBuilding;
+export interface ConveyorItem {
+  id: ItemId;
+  /** 0 = entering edge, 0.5 = tile centre, 1 = ready to leave. */
+  p: number;
+  /** Side it came in from (null when unknown). */
+  from: Dir | null;
+}
+
+/** One belt tile. Workers can't cross it unless it's a bridge (a path laid over it). */
+export interface ConveyorBuilding extends BuildingBase {
+  type: 'conveyor';
+  /** Sides items leave from; several = round-robin splitter. */
+  outs: Dir[];
+  bridge: boolean;
+  item: ConveyorItem | null;
+  /** Round-robin pointer into `outs`. */
+  nextOut: number;
+  /** Zipper pointer: the side whose item gets priority next when several feed this tile. */
+  nextIn: number;
+}
+
+export type Building = PlotBuilding | PathBuilding | HouseBuilding | BinBuilding | IndustryBuilding | ConveyorBuilding;
 
 export interface Point {
   x: number;

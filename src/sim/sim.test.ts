@@ -3,7 +3,7 @@ import { CONFIG, CROPS, ITEMS, RECIPES } from '../config';
 import { computeConnected, findRoute } from './pathfinding';
 import { catchUp, loadWorld, saveWorld, type StorageLike } from './save';
 import { advance } from './simulate';
-import type { BinBuilding, IndustryBuilding, PlotBuilding } from './types';
+import type { BinBuilding, ConveyorBuilding, IndustryBuilding, PlotBuilding } from './types';
 import { stockCount, World } from './world';
 
 function memoryStorage(): StorageLike {
@@ -354,5 +354,155 @@ describe('save & offline progress', () => {
     const storage = memoryStorage();
     storage.setItem(CONFIG.saveKey, '{not json');
     expect(loadWorld(storage)).toBeNull();
+  });
+});
+
+/** Workshop at (0,0) with its output bin at (2,1). */
+function beltWorld() {
+  const world = new World();
+  world.state.money = 100_000;
+  expect(world.place('industry', 0, 0).ok).toBe(true);
+  const source = world.getBin((world.buildingAt(0, 0) as IndustryBuilding).binId)!;
+  return { world, source };
+}
+
+/** Lays belts through `cells` in order, each pointing at the next (the last points `lastDir`). */
+function lay(world: World, cells: [number, number][], last: [number, number]) {
+  for (const [x, y] of cells) expect(world.place('conveyor', x, y).ok).toBe(true);
+  const all = [...cells, last];
+  for (let i = 0; i < cells.length; i++) {
+    expect(world.linkConveyor(all[i][0], all[i][1], all[i + 1][0], all[i + 1][1], true).ok).toBe(true);
+  }
+}
+
+describe('conveyors', () => {
+  it('carry goods from a workshop output bin into an industry', () => {
+    const { world, source } = beltWorld();
+    expect(world.place('factory', 6, 0).ok).toBe(true);
+    const factory = world.buildingAt(6, 0) as IndustryBuilding;
+    expect(factory).toMatchObject({ kind: 'industry', recipe: 'pastry' });
+    lay(world, [[3, 1], [4, 1], [5, 1]], [6, 1]);
+    source.stock.flour = 4;
+    advance(world, 10);
+    expect(factory.storage.flour).toBe(4);
+    expect(stockCount(source.stock)).toBe(0);
+  });
+
+  it('only lets an industry take the input its recipe needs', () => {
+    const { world, source } = beltWorld();
+    world.place('factory', 6, 0);
+    const factory = world.buildingAt(6, 0) as IndustryBuilding;
+    lay(world, [[3, 1], [4, 1], [5, 1]], [6, 1]);
+    source.stock.bread = 2;
+    advance(world, 10);
+    expect(stockCount(factory.storage)).toBe(0);
+    expect((world.buildingAt(5, 1) as ConveyorBuilding).item?.id).toBe('bread');
+  });
+
+  it('merges two lines in zipper order', () => {
+    const { world, source } = beltWorld();
+    world.place('industry', 0, 4);
+    const source2 = world.getBin((world.buildingAt(0, 4) as IndustryBuilding).binId)!;
+    world.place('bin', 6, 3);
+    lay(world, [[3, 1], [4, 1], [4, 2]], [4, 3]);
+    lay(world, [[3, 5], [4, 5], [4, 4]], [4, 3]);
+    lay(world, [[4, 3], [5, 3]], [6, 3]);
+    source.stock.flour = 20;
+    source2.stock.bread = 20;
+    const merge = world.buildingAt(4, 3) as ConveyorBuilding;
+    const seen: string[] = [];
+    let last: unknown = null;
+    for (let i = 0; i < 600 && seen.length < 10; i++) {
+      advance(world, 0.05);
+      if (merge.item && merge.item !== last) seen.push(merge.item.id);
+      last = merge.item;
+    }
+    expect(seen.length).toBe(10);
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).not.toBe(seen[i - 1]);
+  });
+
+  it('splits round-robin between outputs', () => {
+    const { world, source } = beltWorld();
+    const north = world.place('bin', 4, 0) && (world.buildingAt(4, 0) as BinBuilding);
+    const south = world.place('bin', 4, 2) && (world.buildingAt(4, 2) as BinBuilding);
+    lay(world, [[3, 0]], [4, 0]);
+    lay(world, [[3, 2]], [4, 2]);
+    expect(world.place('conveyor', 3, 1).ok).toBe(true);
+    world.linkConveyor(3, 1, 3, 0, true);
+    world.linkConveyor(3, 1, 3, 2, false);
+    expect((world.buildingAt(3, 1) as ConveyorBuilding).outs).toEqual([3, 1]);
+    source.stock.flour = 6;
+    advance(world, 15);
+    expect(north.stock.flour).toBe(3);
+    expect(south.stock.flour).toBe(3);
+  });
+
+  it('turns when tapped and branching drops outputs that lead nowhere', () => {
+    const world = new World();
+    world.place('conveyor', 5, 5);
+    const c = world.buildingAt(5, 5) as ConveyorBuilding;
+    world.rotateConveyor(c.id);
+    expect(c.outs).toEqual([0]);
+    world.rotateConveyor(c.id);
+    expect(c.outs).toEqual([1]);
+    world.place('conveyor', 4, 5);
+    world.linkConveyor(5, 5, 4, 5, false);
+    expect(c.outs).toEqual([2]);
+  });
+});
+
+describe('bridges', () => {
+  it('crossing a path and a conveyor makes a bridge automatically', () => {
+    const world = new World();
+    world.place('path', 5, 5);
+    const money = world.money;
+    expect(world.place('conveyor', 5, 5).ok).toBe(true);
+    expect(world.buildingAt(5, 5)).toMatchObject({ type: 'conveyor', bridge: true });
+    expect(world.money).toBe(money - CONFIG.costs.conveyor);
+
+    world.place('conveyor', 6, 5);
+    expect(world.place('path', 6, 5).ok).toBe(true);
+    expect(world.buildingAt(6, 5)).toMatchObject({ type: 'conveyor', bridge: true });
+    expect(world.place('path', 6, 5).ok).toBe(false);
+
+    // Removing a bridge leaves the path.
+    world.demolish(world.buildingAt(6, 5)!.id);
+    expect(world.buildingAt(6, 5)?.type).toBe('path');
+  });
+
+  it('workers cannot cross plain belts but can cross bridges', () => {
+    const { world, plot } = starterFarm();
+    world.demolish(world.buildingAt(4, 1)!.id);
+    world.place('conveyor', 4, 1);
+    expect(world.connected.has(plot.id)).toBe(false);
+    world.place('path', 4, 1);
+    expect(world.connected.has(plot.id)).toBe(true);
+  });
+});
+
+describe('industry', () => {
+  it('a crafter turns conveyed flour into pastries', () => {
+    const { world } = workshopFarm();
+    for (const y of [5, 6, 7]) expect(world.place('path', 3, y).ok).toBe(true);
+    expect(world.place('factory', 4, 7).ok).toBe(true);
+    const factory = world.buildingAt(4, 7) as IndustryBuilding;
+    expect(world.connected.has(factory.id)).toBe(true);
+    expect(world.assignIndustryWorker(factory.id, 'hauler').ok).toBe(false);
+    expect(world.setRecipe(factory.id, 'bread').ok).toBe(false);
+    expect(world.assignIndustryWorker(factory.id, 'crafter').ok).toBe(true);
+    factory.storage.flour = 4;
+    advance(world, 60);
+    expect(world.getBin(factory.binId)!.stock.pastry).toBe(2);
+    expect(factory.storage.flour ?? 0).toBe(0);
+  });
+
+  it('old saves load workshops as workshops', () => {
+    const { world } = workshopFarm();
+    const old = JSON.parse(JSON.stringify(world.state));
+    for (const b of old.buildings) delete b.kind;
+    const storage = memoryStorage();
+    storage.setItem(CONFIG.saveKey, JSON.stringify(old));
+    const loaded = loadWorld(storage)!;
+    expect(loaded.buildingAt(4, 4)).toMatchObject({ type: 'industry', kind: 'workshop' });
   });
 });

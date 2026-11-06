@@ -2,26 +2,30 @@ import { CONFIG, CROPS, ITEMS, RECIPES, type GoodId, type ItemId } from '../conf
 import type { GameController, Tool } from '../game/controller';
 import type { CatchUpSummary } from '../sim/save';
 import { taskProgress } from '../sim/simulate';
-import type { Building, IndustryBuilding, Worker, WorkerRole } from '../sim/types';
+import type { Building, ConveyorBuilding, IndustryBuilding, Worker, WorkerRole } from '../sim/types';
 import { binValue, isIdleWorker, stockCount, type World } from '../sim/world';
 
 const TOOLS: { tool: Tool; icon: string; label: string; cost?: number }[] = [
   { tool: 'select', icon: '👆', label: 'Select' },
   { tool: 'plot', icon: '🌱', label: 'Farmland', cost: CONFIG.costs.plot },
   { tool: 'path', icon: '🟫', label: 'Path', cost: CONFIG.costs.path },
+  { tool: 'conveyor', icon: '⏩', label: 'Conveyor', cost: CONFIG.costs.conveyor },
   { tool: 'house', icon: '🏠', label: 'House', cost: CONFIG.costs.house },
   { tool: 'bin', icon: '📦', label: 'Bin', cost: CONFIG.costs.bin },
   { tool: 'industry', icon: '🏭', label: 'Workshop', cost: CONFIG.costs.industry },
+  { tool: 'factory', icon: '🏗️', label: 'Industry', cost: CONFIG.costs.factory },
   { tool: 'demolish', icon: '🔨', label: 'Remove' },
 ];
 
 const HINTS: Partial<Record<Tool, string>> = {
-  select: 'Tap a field, bin, house or workshop to manage it',
+  select: 'Tap a field, bin, house, workshop or belt to manage it',
   plot: 'Tap or drag to plant farmland · 4 in a square make a big field',
-  path: 'Tap or drag to lay paths · connect fields & bins to a house',
+  path: 'Tap or drag to lay paths · crossing a conveyor makes a bridge',
+  conveyor: 'Drag to lay belts in that direction · start on a belt to branch · tap a belt to turn it',
   house: 'Tap to place a 3×3 employee house (4 beds)',
   bin: 'Tap to place an output bin',
   industry: 'Tap to place a 2×2 workshop with its own output bin · connect it with a path',
+  factory: 'Tap to place a 2×2 industry · feed it workshop goods by conveyor',
   demolish: `Tap to remove · refunds ${CONFIG.demolishRefund * 100}%`,
 };
 
@@ -39,7 +43,7 @@ export function mountHud(root: HTMLElement, controller: GameController, onReset:
     <div class="panel" id="panel" hidden></div>
     <div class="bottom">
       <div class="hint" id="hint"></div>
-      <div class="toolbar" id="toolbar" style="grid-template-columns: repeat(${TOOLS.length}, 1fr)">
+      <div class="toolbar" id="toolbar">
         ${TOOLS.map(
           (t) => `<button class="tool" data-tool="${t.tool}">
             <span class="tool-icon">${t.icon}</span>
@@ -95,6 +99,9 @@ export function mountHud(root: HTMLElement, controller: GameController, onReset:
       <p>Workshops turn wheat into goods: hire a hauler to bring wheat from your bins and a crafter to make the
       chosen product into the workshop's own output bin. Haulers keep every connected workshop supplied,
       starting with whichever is emptiest.</p>
+      <p>Conveyors carry goods out of a workshop's output bin. Drag a belt from the bin into an Industry, which
+      turns flour into pastries or bread into sandwiches. Belts that join take turns (zipper); a belt with
+      several exits splits round-robin. Workers can't cross belts — lay a path over one to make a bridge.</p>
       <p class="muted">Progress saves automatically and keeps going while you're away (up to ${CONFIG.sim.maxOfflineSeconds / 3600}h).</p>
       <div class="row">
         <button class="btn danger" data-action="reset">Start a new farm</button>
@@ -152,6 +159,9 @@ export function mountHud(root: HTMLElement, controller: GameController, onReset:
         if (ind) sell(ind.binId);
         break;
       }
+      case 'turn':
+        controller.act((w) => w.rotateConveyor(id), true);
+        break;
       case 'dismiss':
         controller.act((w) => w.dismissIdleWorker(id));
         break;
@@ -241,8 +251,9 @@ function renderPanel(world: World, b: Building): PanelView {
       const value = binValue(b);
       const attached = b.industryId != null;
       return { body: `
-        <div class="panel-head"><h3>${attached ? 'Workshop output bin' : 'Output bin'}</h3></div>
-        ${stockLines(b.stock) || `<div class="muted">Empty — ${attached ? 'the crafter puts finished goods here' : 'workers will drop harvests here'}.</div>`}
+        <div class="panel-head"><h3>${attached ? `${world.getIndustry(b.industryId)?.kind === 'industry' ? 'Industry' : 'Workshop'} output bin` : 'Output bin'}</h3></div>
+        ${stockLines(b.stock) || `<div class="muted">Empty — ${attached ? 'the crafter puts finished goods here' : 'workers and conveyors drop goods here'}.</div>`}
+        ${attached ? '<div class="muted">Touching conveyors carry these goods away.</div>' : ''}
         ${connected ? '' : warning('Not connected to a house by a path')}`, actions: `<button class="btn primary" data-action="sell" ${value ? '' : 'disabled'}>Sell all · $${value}</button>` };
     }
     case 'industry':
@@ -259,7 +270,24 @@ function renderPanel(world: World, b: Building): PanelView {
       return { body: `
         <div class="panel-head"><h3>Path</h3></div>
         <div class="muted">Workers walk along paths between houses, fields, bins and workshops.</div>`, actions: `` };
+    case 'conveyor':
+      return renderConveyor(b);
   }
+}
+
+const DIR_NAMES = ['east →', 'south ↓', 'west ←', 'north ↑'];
+
+function renderConveyor(b: ConveyorBuilding): PanelView {
+  const outs = b.outs.length ? b.outs.map((d) => DIR_NAMES[d]).join(', ') : 'Nowhere';
+  const item = b.item ? `1 ${ITEMS[b.item.id].icon} ${ITEMS[b.item.id].name.toLowerCase()}` : 'Empty';
+  return {
+    body: `
+      <div class="panel-head"><h3>${b.bridge ? 'Conveyor crossing' : 'Conveyor'}</h3></div>
+      <div class="stat"><span>${b.outs.length > 1 ? 'Splits to' : 'Flows'}</span><b>${outs}</b></div>
+      <div class="stat"><span>Carrying</span><b>${item}</b></div>
+      <div class="muted">${b.bridge ? 'Workers walk across this bridge.' : 'Workers can\'t cross belts — lay a path over it to make a bridge.'}</div>`,
+    actions: `<button class="btn" data-action="turn">Turn ↻</button>`,
+  };
 }
 
 function renderIndustry(
@@ -272,6 +300,7 @@ function renderIndustry(
   const input = ITEMS[recipe.input];
   const crafter = world.getWorker(b.crafterId);
   const hauler = world.getWorker(b.haulerId);
+  const factory = b.kind === 'industry';
   const bin = world.getBin(b.binId);
   const value = bin ? binValue(bin) : 0;
   const bench = b.crafting
@@ -279,6 +308,7 @@ function renderIndustry(
     : 'Empty';
 
   const options = (Object.keys(RECIPES) as GoodId[])
+    .filter((id) => RECIPES[id].building === b.kind)
     .map((id) => {
       const r = RECIPES[id];
       const out = ITEMS[id];
@@ -293,16 +323,20 @@ function renderIndustry(
 
   return {
     body: `
-      <div class="panel-head"><h3>Workshop · ${ITEMS[b.recipe].icon} ${ITEMS[b.recipe].name}</h3></div>
+      <div class="panel-head"><h3>${factory ? 'Industry' : 'Workshop'} · ${ITEMS[b.recipe].icon} ${ITEMS[b.recipe].name}</h3></div>
       <div class="stat"><span>Storage</span><b>${input.icon} ${stockCount(b.storage)}/${CONFIG.industry.storageCapacity}</b></div>
       <div class="stat"><span>Workbench</span><b>${bench}</b></div>
       <div class="stat"><span>${ROLE_LABEL.crafter}</span><b>${crafter ? describeWorker(world, crafter) : 'None'}</b></div>
-      <div class="stat"><span>${ROLE_LABEL.hauler}</span><b>${hauler ? describeWorker(world, hauler) : 'None'}</b></div>
+      ${
+        factory
+          ? `<div class="stat"><span>Supply</span><b>Fed by conveyors</b></div>`
+          : `<div class="stat"><span>${ROLE_LABEL.hauler}</span><b>${hauler ? describeWorker(world, hauler) : 'None'}</b></div>`
+      }
       <div class="stat"><span>Output bin</span><b>${bin && stockCount(bin.stock) ? stockSummary(bin.stock) : 'Empty'}</b></div>
       ${connected ? '' : `<div class="warning">⚠️ Not connected to a house by a path</div>`}`,
     controls: `<label class="field"><span>Makes</span><select data-action="recipe">${options}</select></label>`,
     actions: `
-      <div class="row">${staffButton('hauler', hauler)}${staffButton('crafter', crafter)}</div>
+      <div class="row">${factory ? '' : staffButton('hauler', hauler)}${staffButton('crafter', crafter)}</div>
       <button class="btn" data-action="sell-output" ${value ? '' : 'disabled'}>Sell output · $${value}</button>`,
   };
 }

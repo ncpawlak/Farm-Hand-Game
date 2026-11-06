@@ -1,9 +1,12 @@
-import { CONFIG, ITEMS, RECIPES, type CropId, type GoodId, type ItemId } from '../config';
+import { CONFIG, ITEMS, RECIPES, type GoodId, type ItemId } from '../config';
+import { DIRS, dirBetween, opposite } from './conveyor';
 import { computeConnected, type GridLookup } from './pathfinding';
 import type {
   BinBuilding,
   Building,
   BuildingType,
+  ConveyorBuilding,
+  Dir,
   GameState,
   HouseBuilding,
   IndustryBuilding,
@@ -14,7 +17,8 @@ import type {
   WorkerRole,
 } from './types';
 
-export type PlaceableType = BuildingType;
+/** 'industry' places a Workshop; 'factory' places an Industry (both are IndustryBuildings). */
+export type PlaceableType = BuildingType | 'factory';
 
 const fail = (reason: string): Result => ({ ok: false, reason });
 const OK: Result = { ok: true };
@@ -40,7 +44,7 @@ export function footprintCells(type: PlaceableType, x: number, y: number): Point
   for (let cy = y; cy < y + size; cy++) {
     for (let cx = x; cx < x + size; cx++) cells.push({ x: cx, y: cy });
   }
-  if (type === 'industry') {
+  if (type === 'industry' || type === 'factory') {
     const o = CONFIG.industry.binOffset;
     cells.push({ x: x + o.x, y: y + o.y });
   }
@@ -136,17 +140,42 @@ export class World implements GridLookup {
   // ---------------------------------------------------------------- building
 
   canPlace(type: PlaceableType, x: number, y: number): Result {
+    const here = this.buildingAt(x, y);
+    // Crossing a path and a belt makes a bridge automatically.
+    if (type === 'conveyor' && here?.type === 'path') return this.afford(CONFIG.costs.conveyor);
+    if (type === 'path' && here?.type === 'conveyor') {
+      return here.bridge ? fail('Already a crossing') : this.afford(CONFIG.costs.path);
+    }
     for (const c of footprintCells(type, x, y)) {
       if (!this.inBounds(c.x, c.y)) return fail('Out of bounds');
       if (this.buildingAt(c.x, c.y)) return fail('Space is taken');
     }
-    if (this.state.money < CONFIG.costs[type]) return fail('Not enough money');
-    return OK;
+    return this.afford(CONFIG.costs[type]);
+  }
+
+  private afford(cost: number): Result {
+    return this.state.money < cost ? fail('Not enough money') : OK;
   }
 
   place(type: PlaceableType, x: number, y: number): Result {
     const check = this.canPlace(type, x, y);
     if (!check.ok) return check;
+    const here = this.buildingAt(x, y);
+    if (type === 'path' && here?.type === 'conveyor') {
+      here.bridge = true;
+      here.cost += CONFIG.costs.path;
+      this.state.money -= CONFIG.costs.path;
+      this.rebuild();
+      return OK;
+    }
+    if (type === 'conveyor' && here?.type === 'path') {
+      // Swap the path for a bridged belt (keeps the path's value).
+      this.state.buildings = this.state.buildings.filter((b) => b.id !== here.id);
+      this.state.money -= CONFIG.costs.conveyor;
+      this.state.buildings.push(this.newConveyor(x, y, true, here.cost + CONFIG.costs.conveyor));
+      this.rebuild();
+      return OK;
+    }
     const size = CONFIG.footprints[type];
     const cost = CONFIG.costs[type];
     const base = { id: this.state.nextId++, x, y, w: size, h: size, cost };
@@ -158,7 +187,11 @@ export class World implements GridLookup {
       case 'bin':
         this.state.buildings.push({ ...base, type, stock: {} });
         break;
-      case 'industry': {
+      case 'conveyor':
+        this.state.buildings.push({ ...base, type, outs: [], bridge: false, item: null, nextOut: 0, nextIn: 0 });
+        break;
+      case 'industry':
+      case 'factory': {
         const o = CONFIG.industry.binOffset;
         const bin: BinBuilding = {
           id: this.state.nextId++,
@@ -173,8 +206,9 @@ export class World implements GridLookup {
         };
         const industry: IndustryBuilding = {
           ...base,
-          type,
-          recipe: 'flour',
+          type: 'industry',
+          kind: type === 'factory' ? 'industry' : 'workshop',
+          recipe: type === 'factory' ? 'pastry' : 'flour',
           storage: {},
           crafting: null,
           binId: bin.id,
@@ -237,11 +271,59 @@ export class World implements GridLookup {
     }
   }
 
+  private newConveyor(x: number, y: number, bridge: boolean, cost: number): ConveyorBuilding {
+    return { id: this.state.nextId++, type: 'conveyor', x, y, w: 1, h: 1, cost, outs: [], bridge, item: null, nextOut: 0, nextIn: 0 };
+  }
+
+  /**
+   * Points the belt at a towards the neighbouring cell b. `replace` makes it the only output;
+   * otherwise it's added as a branch (dropping outputs that lead nowhere). A belt at b no longer
+   * flows back into a.
+   */
+  linkConveyor(ax: number, ay: number, bx: number, by: number, replace: boolean): Result {
+    const a = this.buildingAt(ax, ay);
+    if (a?.type !== 'conveyor') return fail('Not a conveyor');
+    const d = dirBetween({ x: ax, y: ay }, { x: bx, y: by });
+    if (d == null) return fail('Not adjacent');
+    const b = this.buildingAt(bx, by);
+    if (b === a) return fail('Not adjacent');
+    if (replace) a.outs = [d];
+    else {
+      a.outs = a.outs.filter((o) => o !== d && this.buildingAt(ax + DIRS[o].x, ay + DIRS[o].y));
+      a.outs.push(d);
+    }
+    a.nextOut = 0;
+    if (b?.type === 'conveyor') b.outs = b.outs.filter((o) => o !== opposite(d));
+    return OK;
+  }
+
+  /** Turns a belt to face the next direction clockwise. */
+  rotateConveyor(id: number): Result {
+    const c = this.getBuilding(id);
+    if (c?.type !== 'conveyor') return fail('Not a conveyor');
+    const next = c.outs.length === 0 ? 0 : (c.outs[0] + 1) % 4;
+    c.outs = [next as Dir];
+    c.nextOut = 0;
+    return OK;
+  }
+
   demolish(id: number): Result {
     const b = this.getBuilding(id);
     if (!b) return fail('Nothing to demolish');
     // An attached output bin goes with its workshop.
     if (b.type === 'bin' && b.industryId != null) return this.demolish(b.industryId);
+    if (b.type === 'conveyor') {
+      if (b.item) this.state.money += ITEMS[b.item.id].sellPrice;
+      if (b.bridge) {
+        // Removing a crossing leaves the path behind.
+        const pathCost = CONFIG.costs.path;
+        this.state.money += Math.floor(Math.max(0, b.cost - pathCost) * CONFIG.demolishRefund);
+        this.state.buildings = this.state.buildings.filter((o) => o.id !== id);
+        this.state.buildings.push({ id: this.state.nextId++, type: 'path', x: b.x, y: b.y, w: 1, h: 1, cost: pathCost });
+        this.rebuild();
+        return OK;
+      }
+    }
     if (b.type === 'house') {
       const bedsAfter = this.bedCount() - CONFIG.houseBeds;
       if (this.state.workers.length > bedsAfter) return fail('Workers live here — dismiss some first');
@@ -298,6 +380,16 @@ export class World implements GridLookup {
     const ind = this.getIndustry(industryId);
     if (!ind) return fail('Not a workshop');
     if (!RECIPES[recipe]) return fail('Unknown recipe');
+    if (RECIPES[recipe].building !== ind.kind) return fail(`A ${ind.kind} can't make that`);
+    if (recipe !== ind.recipe) {
+      // Inputs for the old recipe are sold off so storage only holds what's needed.
+      for (const [item, n] of Object.entries(ind.storage)) {
+        if (item !== RECIPES[recipe].input) {
+          this.state.money += (n ?? 0) * ITEMS[item as ItemId].sellPrice;
+          delete ind.storage[item as ItemId];
+        }
+      }
+    }
     ind.recipe = recipe;
     return OK;
   }
@@ -329,6 +421,7 @@ export class World implements GridLookup {
   assignIndustryWorker(industryId: number, role: WorkerRole): Result {
     const ind = this.getIndustry(industryId);
     if (!ind) return fail('Not a workshop');
+    if (role === 'hauler' && ind.kind === 'industry') return fail('Industries are fed by conveyors');
     const slot = role === 'crafter' ? 'crafterId' : 'haulerId';
     if (ind[slot] != null) return fail(`Workshop already has a ${role}`);
     const got = this.obtainWorker();
@@ -405,7 +498,7 @@ export class World implements GridLookup {
           ind.crafting = null;
         }
         if (w.carrying && w.task === 'loading') {
-          const item = w.carrying.item as CropId;
+          const item = w.carrying.item;
           ind.storage[item] = (ind.storage[item] ?? 0) + w.carrying.amount;
           w.carrying = null;
         }

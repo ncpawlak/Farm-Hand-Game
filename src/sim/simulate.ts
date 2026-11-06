@@ -1,4 +1,5 @@
-import { CONFIG, CROPS, RECIPES, type CropId, type GoodId } from '../config';
+import { CONFIG, CROPS, ITEMS, RECIPES, type GoodId, type ItemId } from '../config';
+import { updateConveyors } from './conveyor';
 import { findRoute } from './pathfinding';
 import type { Building, IndustryBuilding, PlotBuilding, Point, Worker, WorkerGoal } from './types';
 import { stockCount, type World } from './world';
@@ -23,6 +24,7 @@ export function tick(world: World, dt: number): void {
       }
     }
   }
+  updateConveyors(world, dt);
   for (const w of world.state.workers) updateWorker(world, w, dt);
 }
 
@@ -142,7 +144,7 @@ function updateWorkshop(world: World, w: Worker, dt: number): void {
         // Hauler stacks what it brought in the storage section (any extra goes elsewhere).
         if (!moveTo(w, storageSpot(ind), speed)) return;
         if (w.carrying) {
-          const crop = w.carrying.item as CropId;
+          const crop = w.carrying.item;
           const room = Math.max(0, CONFIG.industry.storageCapacity - stockCount(ind.storage));
           const put = Math.min(room, w.carrying.amount);
           if (put > 0) ind.storage[crop] = (ind.storage[crop] ?? 0) + put;
@@ -248,14 +250,15 @@ function decideNext(world: World, w: Worker): void {
   else w.blocked = null;
 }
 
-function isGood(item: string): item is GoodId {
-  return item in RECIPES;
+/** True when the item is something this building makes (rather than one of its inputs). */
+function isOutputOf(item: ItemId, ind: IndustryBuilding): boolean {
+  return item in RECIPES && RECIPES[item as GoodId].building === ind.kind;
 }
 
 function decideCrafter(world: World, w: Worker, ind: IndustryBuilding): void {
   const inside = !!ownIndustryContaining(world, w);
   if (w.carrying) {
-    if (isGood(w.carrying.item)) return startTrip(world, w, 'outbin');
+    if (isOutputOf(w.carrying.item, ind)) return startTrip(world, w, 'outbin');
     // Raw inputs in hand (e.g. after a reload): finish taking them to the bench.
     if (inside) return setTask(w, 'loading');
     return startTrip(world, w, 'industry');
@@ -268,7 +271,7 @@ function decideCrafter(world: World, w: Worker, ind: IndustryBuilding): void {
     w.status = null;
     return setTask(w, 'fetching');
   }
-  w.status = `Waiting for ${CROPS[r.input].name.toLowerCase()}`;
+  w.status = `Waiting for ${ITEMS[r.input].name.toLowerCase()}`;
   setTask(w, 'waiting');
 }
 
@@ -341,17 +344,17 @@ function pickHaulTarget(world: World, w: Worker, item: string | null): IndustryB
 }
 
 function binsHold(world: World, item: string): boolean {
-  return world.state.buildings.some((b) => isFarmBin(b) && (b.stock[item as CropId] ?? 0) > 0);
+  return world.state.buildings.some((b) => isFarmBin(b) && (b.stock[item as ItemId] ?? 0) > 0);
 }
 
 function haulerWaitStatus(world: World): string {
-  const needs = new Set<CropId>();
+  const needs = new Set<ItemId>();
   for (const b of world.state.buildings) {
-    if (b.type !== 'industry' || !world.connected.has(b.id)) continue;
+    if (b.type !== 'industry' || b.kind !== 'workshop' || !world.connected.has(b.id)) continue;
     if (stockCount(b.storage) < CONFIG.industry.storageCapacity) needs.add(RECIPES[b.recipe].input);
   }
   if (needs.size === 0) return 'Workshops are full';
-  return `Waiting for ${[...needs].map((c) => CROPS[c].name.toLowerCase()).join(' / ')} in bins`;
+  return `Waiting for ${[...needs].map((c) => ITEMS[c].name.toLowerCase()).join(' / ')} in bins`;
 }
 
 function setTask(w: Worker, task: Worker['task']): void {

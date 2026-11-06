@@ -34,6 +34,9 @@ export function loadWorld(storage: StorageLike): World | null {
 /** Fills in fields added after the first release so older saves keep working. */
 function migrate(state: GameState): void {
   state.stats ??= { harvested: 0, crafted: 0 };
+  for (const b of state.buildings) {
+    if (b.type === 'industry') b.kind ??= 'workshop';
+  }
   for (const w of state.workers) {
     w.industryId ??= null;
     w.role ??= null;
