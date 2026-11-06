@@ -141,7 +141,7 @@ function accepts(target: Building, item: ItemId): boolean {
     case 'conveyor':
       return target.item == null;
     case 'bin':
-      return true;
+      return !isSourceBin(target);
     case 'industry':
       return RECIPES[target.recipe].input === item && stockCount(target.storage) < CONFIG.industry.storageCapacity;
     default:

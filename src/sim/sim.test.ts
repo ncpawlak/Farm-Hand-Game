@@ -388,6 +388,24 @@ describe('conveyors', () => {
     expect(stockCount(source.stock)).toBe(0);
   });
 
+  it("won't feed an attached output bin", () => {
+    const { world, source } = beltWorld();
+    world.place('factory', 0, 4);
+    const factoryBin = world.getBin((world.buildingAt(0, 4) as IndustryBuilding).binId)!;
+    world.place('conveyor', 3, 5);
+    expect(world.linkConveyor(3, 5, 2, 5, true).ok).toBe(false);
+    lay(world, [[3, 1], [3, 2], [3, 3], [3, 4]], [3, 5]);
+    // Even if a belt is forced to face it, the bin refuses the goods.
+    (world.buildingAt(3, 5) as ConveyorBuilding).outs = [2];
+    source.stock.flour = 3;
+    advance(world, 20);
+    expect(stockCount(factoryBin.stock)).toBe(0);
+    for (let i = 0; i < 4; i++) {
+      world.rotateConveyor(world.buildingAt(3, 5)!.id);
+      expect((world.buildingAt(3, 5) as ConveyorBuilding).outs).not.toContain(2);
+    }
+  });
+
   it('only lets an industry take the input its recipe needs', () => {
     const { world, source } = beltWorld();
     world.place('factory', 6, 0);

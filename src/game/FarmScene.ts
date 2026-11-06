@@ -292,7 +292,7 @@ export class FarmScene extends Phaser.Scene {
       }
       this.beltCreated.add(key(cell));
     } else if (prev) {
-      this.controller.act((w) => w.linkConveyor(prev.x, prev.y, cell.x, cell.y, replace), true);
+      this.controller.act((w) => w.linkConveyor(prev.x, prev.y, cell.x, cell.y, replace), this.paintFailed);
       // Running into a building ends the line there.
       if (here.type !== 'conveyor') this.beltStopped = true;
     }

@@ -1,5 +1,5 @@
 import { CONFIG, ITEMS, RECIPES, type GoodId, type ItemId } from '../config';
-import { DIRS, dirBetween, opposite } from './conveyor';
+import { DIRS, dirBetween, isSourceBin, opposite } from './conveyor';
 import { computeConnected, type GridLookup } from './pathfinding';
 import type {
   BinBuilding,
@@ -287,6 +287,7 @@ export class World implements GridLookup {
     if (d == null) return fail('Not adjacent');
     const b = this.buildingAt(bx, by);
     if (b === a) return fail('Not adjacent');
+    if (isSourceBin(b)) return fail("Belts can't feed an output bin");
     if (replace) a.outs = [d];
     else {
       a.outs = a.outs.filter((o) => o !== d && this.buildingAt(ax + DIRS[o].x, ay + DIRS[o].y));
@@ -301,7 +302,8 @@ export class World implements GridLookup {
   rotateConveyor(id: number): Result {
     const c = this.getBuilding(id);
     if (c?.type !== 'conveyor') return fail('Not a conveyor');
-    const next = c.outs.length === 0 ? 0 : (c.outs[0] + 1) % 4;
+    let next = c.outs.length === 0 ? 0 : (c.outs[0] + 1) % 4;
+    for (let i = 0; i < 4 && isSourceBin(this.buildingAt(c.x + DIRS[next].x, c.y + DIRS[next].y)); i++) next = (next + 1) % 4;
     c.outs = [next as Dir];
     c.nextOut = 0;
     return OK;
