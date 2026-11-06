@@ -37,6 +37,7 @@ function migrate(state: GameState): void {
   for (const w of state.workers) {
     w.industryId ??= null;
     w.role ??= null;
+    w.targetId ??= null;
     w.status ??= null;
     const carrying = w.carrying as (typeof w.carrying & { crop?: string }) | null;
     if (carrying && !carrying.item && carrying.crop) {

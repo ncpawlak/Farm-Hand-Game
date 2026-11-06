@@ -362,6 +362,7 @@ export class World implements GridLookup {
       plotId: null,
       industryId: null,
       role: null,
+      targetId: null,
       x: home.x + home.w / 2,
       y: home.y + home.h / 2,
       inside: true,
@@ -414,6 +415,7 @@ export class World implements GridLookup {
     w.plotId = null;
     w.industryId = null;
     w.role = null;
+    w.targetId = null;
     w.status = null;
     if (!(w.task === 'walking' && w.goal === 'bin')) {
       w.task = 'idle';

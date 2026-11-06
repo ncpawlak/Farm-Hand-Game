@@ -139,13 +139,16 @@ function updateWorkshop(world: World, w: Worker, dt: number): void {
 
     case 'loading': {
       if (w.role === 'hauler') {
-        // Hauler stacks what it brought in the storage section.
+        // Hauler stacks what it brought in the storage section (any extra goes elsewhere).
         if (!moveTo(w, storageSpot(ind), speed)) return;
         if (w.carrying) {
           const crop = w.carrying.item as CropId;
-          ind.storage[crop] = (ind.storage[crop] ?? 0) + w.carrying.amount;
-          w.carrying = null;
+          const room = Math.max(0, CONFIG.industry.storageCapacity - stockCount(ind.storage));
+          const put = Math.min(room, w.carrying.amount);
+          if (put > 0) ind.storage[crop] = (ind.storage[crop] ?? 0) + put;
+          w.carrying = put < w.carrying.amount ? { item: crop, amount: w.carrying.amount - put } : null;
         }
+        w.targetId = null;
         return toIdle(w);
       }
       // Crafter carries the inputs to the workbench.
@@ -207,16 +210,33 @@ function assignedPlotContaining(world: World, w: Worker): PlotBuilding | undefin
 }
 
 function ownIndustryContaining(world: World, w: Worker): IndustryBuilding | undefined {
-  const ind = world.getIndustry(w.industryId);
+  const ind = workplace(world, w);
   if (!ind || w.inside) return undefined;
   const c = cellOf(w);
   return contains(ind, c.x, c.y) ? ind : undefined;
 }
 
+/**
+ * The workshop a worker is working at. Crafters stay at their own; haulers go wherever
+ * their current trip's target is, otherwise the one they're standing in, otherwise their own.
+ */
+function workplace(world: World, w: Worker): IndustryBuilding | undefined {
+  if (w.role === 'hauler') {
+    const target = world.getIndustry(w.targetId);
+    if (target) return target;
+    if (!w.inside) {
+      const c = cellOf(w);
+      const here = world.buildingAt(c.x, c.y);
+      if (here?.type === 'industry') return here;
+    }
+  }
+  return world.getIndustry(w.industryId);
+}
+
 function decideNext(world: World, w: Worker): void {
   const ind = world.getIndustry(w.industryId);
   if (ind && w.role === 'crafter') return decideCrafter(world, w, ind);
-  if (ind && w.role === 'hauler') return decideHauler(world, w, ind);
+  if (ind && w.role === 'hauler') return decideHauler(world, w);
   if (w.carrying) return startTrip(world, w, 'bin');
   if (w.plotId != null) {
     const plot = assignedPlotContaining(world, w);
@@ -252,25 +272,86 @@ function decideCrafter(world: World, w: Worker, ind: IndustryBuilding): void {
   setTask(w, 'waiting');
 }
 
-function decideHauler(world: World, w: Worker, ind: IndustryBuilding): void {
-  const inside = !!ownIndustryContaining(world, w);
+function decideHauler(world: World, w: Worker): void {
   if (w.carrying) {
     w.status = null;
-    return inside ? setTask(w, 'loading') : startTrip(world, w, 'industry');
+    const item = w.carrying.item;
+    let target = world.getIndustry(w.targetId);
+    if (!target || !wantsInput(world, target, item)) {
+      target = pickHaulTarget(world, w, item);
+      w.targetId = target?.id ?? null;
+    }
+    // No workshop can take it any more: put it back in a farm bin.
+    if (!target) return startTrip(world, w, 'bin');
+    return ownIndustryContaining(world, w) ? setTask(w, 'loading') : startTrip(world, w, 'industry');
   }
-  const input = RECIPES[ind.recipe].input;
-  const space = CONFIG.industry.storageCapacity - stockCount(ind.storage);
-  const supply = space > 0 && world.state.buildings.some((b) => isFarmBin(b) && (b.stock[input] ?? 0) > 0);
-  if (supply) {
+
+  w.targetId = null;
+  const target = pickHaulTarget(world, w, null);
+  if (target) {
+    w.targetId = target.id;
     w.status = null;
     startTrip(world, w, 'pickup');
-    if (w.task === 'walking' || !inside) return;
+    if (w.task === 'walking') return;
+    w.targetId = null;
+    if (!ownIndustryContaining(world, w)) return;
   } else {
     w.blocked = null;
   }
-  if (!inside) return startTrip(world, w, 'industry');
-  if (!w.blocked) w.status = space <= 0 ? 'Storage full' : `Waiting for ${CROPS[input].name.toLowerCase()} in bins`;
+  if (!ownIndustryContaining(world, w)) return startTrip(world, w, 'industry');
+  if (!w.blocked) w.status = haulerWaitStatus(world);
   setTask(w, 'waiting');
+}
+
+function wantsInput(world: World, ind: IndustryBuilding, item: string): boolean {
+  return world.connected.has(ind.id) && RECIPES[ind.recipe].input === item;
+}
+
+/** Room left in a workshop's storage after counting what other haulers are already bringing. */
+function haulRoom(world: World, ind: IndustryBuilding, self: Worker): number {
+  let incoming = 0;
+  for (const h of world.state.workers) {
+    if (h === self || h.role !== 'hauler' || h.targetId !== ind.id) continue;
+    incoming += h.carrying?.amount ?? CONFIG.industry.haulCapacity;
+  }
+  return CONFIG.industry.storageCapacity - stockCount(ind.storage) - incoming;
+}
+
+/**
+ * Picks the connected workshop that most needs supplies: lowest fill (including deliveries in
+ * flight), preferring the hauler's own workshop on ties. With `item`, only workshops that use it;
+ * without, only workshops whose input is waiting in a farm bin.
+ */
+function pickHaulTarget(world: World, w: Worker, item: string | null): IndustryBuilding | undefined {
+  let best: IndustryBuilding | undefined;
+  let bestFill = Infinity;
+  for (const b of world.state.buildings) {
+    if (b.type !== 'industry' || !world.connected.has(b.id)) continue;
+    const input = RECIPES[b.recipe].input;
+    if (item ? input !== item : !binsHold(world, input)) continue;
+    const room = haulRoom(world, b, w);
+    if (room <= 0) continue;
+    const fill = 1 - room / CONFIG.industry.storageCapacity - (b.id === w.industryId ? 1e-6 : 0);
+    if (fill < bestFill) {
+      best = b;
+      bestFill = fill;
+    }
+  }
+  return best;
+}
+
+function binsHold(world: World, item: string): boolean {
+  return world.state.buildings.some((b) => isFarmBin(b) && (b.stock[item as CropId] ?? 0) > 0);
+}
+
+function haulerWaitStatus(world: World): string {
+  const needs = new Set<CropId>();
+  for (const b of world.state.buildings) {
+    if (b.type !== 'industry' || !world.connected.has(b.id)) continue;
+    if (stockCount(b.storage) < CONFIG.industry.storageCapacity) needs.add(RECIPES[b.recipe].input);
+  }
+  if (needs.size === 0) return 'Workshops are full';
+  return `Waiting for ${[...needs].map((c) => CROPS[c].name.toLowerCase()).join(' / ')} in bins`;
 }
 
 function setTask(w: Worker, task: Worker['task']): void {
@@ -314,13 +395,16 @@ function goalMatcher(world: World, w: Worker, goal: WorkerGoal): ((b: Building) 
       return isFarmBin;
     case 'home':
       return world.getBuilding(w.homeId) ? (b) => b.id === w.homeId : null;
-    case 'industry':
-      return ind ? (b) => b.id === ind.id : null;
+    case 'industry': {
+      const site = workplace(world, w);
+      return site ? (b) => b.id === site.id : null;
+    }
     case 'outbin':
       return ind ? (b) => b.id === ind.binId : null;
     case 'pickup': {
-      if (!ind) return null;
-      const input = RECIPES[ind.recipe].input;
+      const target = world.getIndustry(w.targetId);
+      if (!target) return null;
+      const input = RECIPES[target.recipe].input;
       return (b) => isFarmBin(b) && (b.stock[input] ?? 0) > 0;
     }
   }
@@ -401,10 +485,11 @@ function arrive(world: World, w: Worker): void {
     if (goal === 'outbin' && here.id !== ind?.binId) return;
     here.stock[w.carrying.item] = (here.stock[w.carrying.item] ?? 0) + w.carrying.amount;
     w.carrying = null;
-  } else if (goal === 'pickup' && here && isFarmBin(here) && ind && !w.carrying) {
-    const input = RECIPES[ind.recipe].input;
-    const space = CONFIG.industry.storageCapacity - stockCount(ind.storage);
-    const take = Math.min(CONFIG.industry.haulCapacity, here.stock[input] ?? 0, space);
+  } else if (goal === 'pickup' && here && isFarmBin(here) && !w.carrying) {
+    const target = world.getIndustry(w.targetId);
+    if (!target) return;
+    const input = RECIPES[target.recipe].input;
+    const take = Math.min(CONFIG.industry.haulCapacity, here.stock[input] ?? 0, haulRoom(world, target, w));
     if (take > 0) {
       here.stock[input] = (here.stock[input] ?? 0) - take;
       if (!here.stock[input]) delete here.stock[input];

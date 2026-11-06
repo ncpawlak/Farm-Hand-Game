@@ -93,7 +93,8 @@ export function mountHud(root: HTMLElement, controller: GameController, onReset:
       <p>Build farmland, connect it to an employee house and an output bin with paths, then assign workers.
       Tap a bin to sell its harvest.</p>
       <p>Workshops turn wheat into goods: hire a hauler to bring wheat from your bins and a crafter to make the
-      chosen product into the workshop's own output bin.</p>
+      chosen product into the workshop's own output bin. Haulers keep every connected workshop supplied,
+      starting with whichever is emptiest.</p>
       <p class="muted">Progress saves automatically and keeps going while you're away (up to ${CONFIG.sim.maxOfflineSeconds / 3600}h).</p>
       <div class="row">
         <button class="btn danger" data-action="reset">Start a new farm</button>
@@ -333,7 +334,7 @@ function describeWorker(world: World, w: Worker): string {
       case 'home':
         return 'Heading home';
       case 'industry':
-        return w.carrying ? `Bringing ${load} to the workshop` : 'Walking to the workshop';
+        return w.carrying ? `Bringing ${load} to ${w.targetId != null && w.targetId !== w.industryId ? 'another' : 'the'} workshop` : 'Walking to the workshop';
       case 'pickup':
         return 'Collecting from a bin';
       case 'outbin':

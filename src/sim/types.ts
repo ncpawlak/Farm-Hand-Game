@@ -85,6 +85,8 @@ export interface Worker {
   plotId: number | null;
   industryId: number | null;
   role: WorkerRole | null;
+  /** Haulers: the workshop the current trip is supplying (may differ from the one they were hired at). */
+  targetId: number | null;
   /** Position in tile units (0.5, 0.5 is the centre of cell 0,0). */
   x: number;
   y: number;

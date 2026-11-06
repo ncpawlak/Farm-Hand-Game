@@ -4,7 +4,7 @@ import { computeConnected, findRoute } from './pathfinding';
 import { catchUp, loadWorld, saveWorld, type StorageLike } from './save';
 import { advance } from './simulate';
 import type { BinBuilding, IndustryBuilding, PlotBuilding } from './types';
-import { World } from './world';
+import { stockCount, World } from './world';
 
 function memoryStorage(): StorageLike {
   const map = new Map<string, string>();
@@ -267,6 +267,39 @@ describe('workshops', () => {
     expect(world.unassignIndustryWorker(ind.id, 'crafter').ok).toBe(true);
     expect(ind.crafting).toBeNull();
     expect(ind.storage.wheat).toBe(2);
+  });
+
+  it('a hauler auto-routes to keep every connected workshop supplied', () => {
+    const { world, ind, farmBin } = workshopFarm();
+    for (const y of [5, 6, 7]) expect(world.place('path', 3, y).ok).toBe(true);
+    expect(world.place('industry', 4, 7).ok).toBe(true);
+    const second = world.buildingAt(4, 7) as IndustryBuilding;
+    world.setRecipe(second.id, 'bread');
+    farmBin.stock.wheat = 20;
+    expect(world.assignIndustryWorker(ind.id, 'hauler').ok).toBe(true);
+
+    advance(world, 90);
+    expect(stockCount(ind.storage)).toBeGreaterThan(0);
+    expect(stockCount(second.storage)).toBeGreaterThan(0);
+    expect(stockCount(ind.storage) + stockCount(second.storage)).toBe(20);
+    expect(Math.abs(stockCount(ind.storage) - stockCount(second.storage))).toBeLessThanOrEqual(CONFIG.industry.haulCapacity);
+  });
+
+  it('haulers never overfill a workshop', () => {
+    const { world, ind, farmBin } = workshopFarm();
+    farmBin.stock.wheat = 60;
+    expect(world.assignIndustryWorker(ind.id, 'hauler').ok).toBe(true);
+    for (const y of [5, 6, 7]) expect(world.place('path', 3, y).ok).toBe(true);
+    expect(world.place('industry', 4, 7).ok).toBe(true);
+    const second = world.buildingAt(4, 7) as IndustryBuilding;
+    expect(world.assignIndustryWorker(second.id, 'hauler').ok).toBe(true);
+
+    advance(world, 180);
+    expect(stockCount(ind.storage)).toBe(CONFIG.industry.storageCapacity);
+    expect(stockCount(second.storage)).toBe(CONFIG.industry.storageCapacity);
+    expect(farmBin.stock.wheat).toBe(60 - 2 * CONFIG.industry.storageCapacity);
+    for (const w of world.state.workers) expect(w.carrying).toBeNull();
+    expect(world.getWorker(ind.haulerId)!.status).toBe('Workshops are full');
   });
 });
 

@@ -20,7 +20,7 @@ Built with TypeScript + [Phaser](https://phaser.io), packaged as an installable 
 - Tap the workshop and use the **Makes** dropdown to pick a recipe:
   - 🥣 **Flour**: 2 wheat → 1 in 6s, sells for $10.
   - 🍞 **Bread**: 3 wheat → 1 in 10s, sells for $16.
-- **Hauler** (orange): carries up to 5 of the recipe's input from your farm bins into the workshop's storage (max 20).
+- **Hauler** (orange): carries up to 5 of a recipe's input from your farm bins into workshop storage (max 20). Haulers auto-route: each trip goes to whichever connected workshop is emptiest (counting deliveries already on the way), so one hauler can supply several workshops and multiple haulers share the work without overfilling.
 - **Crafter** (purple): moves inputs from storage to the workbench, crafts the good, and puts it in the attached bin. Tap the workshop or its bin to sell the output.
 - Farmers never deliver to workshop bins. Removing a workshop (or its bin) sells everything it holds and sends its workers home.
 
