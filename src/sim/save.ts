@@ -24,21 +24,41 @@ export function loadWorld(storage: StorageLike): World | null {
   try {
     const state = JSON.parse(raw) as GameState;
     if (state.version !== 1 || !Array.isArray(state.buildings) || !Array.isArray(state.workers)) return null;
+    migrate(state);
     return new World(state);
   } catch {
     return null;
   }
 }
 
+/** Fills in fields added after the first release so older saves keep working. */
+function migrate(state: GameState): void {
+  state.stats ??= { harvested: 0, crafted: 0 };
+  for (const w of state.workers) {
+    w.industryId ??= null;
+    w.role ??= null;
+    w.status ??= null;
+    const carrying = w.carrying as (typeof w.carrying & { crop?: string }) | null;
+    if (carrying && !carrying.item && carrying.crop) {
+      w.carrying = { item: carrying.crop as 'wheat', amount: carrying.amount };
+    }
+  }
+}
+
 export interface CatchUpSummary {
   seconds: number;
   harvested: number;
+  crafted: number;
 }
 
 /** Simulates the time that passed while the game was closed or hidden. */
 export function catchUp(world: World, elapsedSeconds: number): CatchUpSummary {
   const seconds = Math.min(Math.max(0, elapsedSeconds), CONFIG.sim.maxOfflineSeconds);
-  const before = world.totalBinStock();
+  const { harvested, crafted } = world.state.stats;
   advance(world, seconds, CONFIG.sim.offlineStepSeconds);
-  return { seconds, harvested: Math.max(0, world.totalBinStock() - before) };
+  return {
+    seconds,
+    harvested: world.state.stats.harvested - harvested,
+    crafted: world.state.stats.crafted - crafted,
+  };
 }

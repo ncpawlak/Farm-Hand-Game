@@ -296,3 +296,58 @@ body {
   gap: 8px;
   margin-top: 12px;
 }
+
+.panel-controls:not(:empty) {
+  margin-top: 8px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.field span {
+  color: var(--muted);
+}
+
+.field select {
+  flex: 1;
+  min-width: 0;
+  border: 2px solid #e6d8bd;
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  background: white;
+}
+
+.panel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-actions .row {
+  display: flex;
+  gap: 8px;
+}
+
+.panel-actions .row .btn {
+  padding: 10px 8px;
+  font-size: 13.5px;
+}
+
+.tool {
+  min-width: 0;
+}
+
+.tool-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

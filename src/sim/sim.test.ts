@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { CONFIG, CROPS } from '../config';
+import { CONFIG, CROPS, ITEMS, RECIPES } from '../config';
 import { computeConnected, findRoute } from './pathfinding';
 import { catchUp, loadWorld, saveWorld, type StorageLike } from './save';
 import { advance } from './simulate';
-import type { PlotBuilding } from './types';
+import type { BinBuilding, IndustryBuilding, PlotBuilding } from './types';
 import { World } from './world';
 
 function memoryStorage(): StorageLike {
@@ -179,9 +179,94 @@ describe('bins', () => {
     if (bin.type !== 'bin') throw new Error('expected bin');
     bin.stock.wheat = 10;
     const before = world.money;
-    expect(world.sellBin(bin.id)).toEqual({ ok: true, earned: 10 * wheat.sellPrice });
-    expect(world.money).toBe(before + 10 * wheat.sellPrice);
+    expect(world.sellBin(bin.id)).toEqual({ ok: true, earned: 10 * ITEMS.wheat.sellPrice });
+    expect(world.money).toBe(before + 10 * ITEMS.wheat.sellPrice);
     expect(world.sellBin(bin.id).ok).toBe(false);
+  });
+});
+
+/** starterFarm plus a workshop at (4,4) (its bin lands on (6,5)), linked by a path down column 3. */
+function workshopFarm() {
+  const { world, plot } = starterFarm();
+  world.state.money = 10_000;
+  for (const y of [2, 3, 4]) expect(world.place('path', 3, y).ok).toBe(true);
+  expect(world.place('industry', 4, 4).ok).toBe(true);
+  const ind = world.buildingAt(4, 4) as IndustryBuilding;
+  const farmBin = world.buildingAt(4, 2) as BinBuilding;
+  const outBin = world.getBin(ind.binId)!;
+  return { world, plot, ind, farmBin, outBin };
+}
+
+describe('workshops', () => {
+  it('places a 2x2 workshop with an attached output bin', () => {
+    const { world, ind, outBin } = workshopFarm();
+    expect(ind).toMatchObject({ type: 'industry', w: 2, h: 2, recipe: 'flour' });
+    expect(outBin).toMatchObject({ x: 6, y: 5, industryId: ind.id });
+    expect(world.connected.has(ind.id)).toBe(true);
+    expect(world.connected.has(outBin.id)).toBe(true);
+    // The bin cell must be free too.
+    world.place('path', 12, 13);
+    expect(world.place('industry', 10, 12)).toEqual({ ok: false, reason: 'Space is taken' });
+  });
+
+  it('demolishing the attached bin removes the whole workshop and pays out its goods', () => {
+    const { world, ind, outBin } = workshopFarm();
+    outBin.stock.flour = 2;
+    ind.storage.wheat = 4;
+    const before = world.money;
+    expect(world.demolish(outBin.id).ok).toBe(true);
+    expect(world.getBuilding(ind.id)).toBeUndefined();
+    expect(world.getBuilding(outBin.id)).toBeUndefined();
+    const expected = 2 * ITEMS.flour.sellPrice + 4 * ITEMS.wheat.sellPrice + CONFIG.costs.industry * CONFIG.demolishRefund;
+    expect(world.money).toBe(before + expected);
+  });
+
+  it('hauler brings wheat in and crafter makes goods into the output bin', () => {
+    const { world, ind, farmBin, outBin } = workshopFarm();
+    farmBin.stock.wheat = 7;
+    expect(world.assignIndustryWorker(ind.id, 'hauler').ok).toBe(true);
+    expect(world.assignIndustryWorker(ind.id, 'crafter').ok).toBe(true);
+    expect(world.assignIndustryWorker(ind.id, 'crafter').ok).toBe(false);
+
+    advance(world, 60);
+    // 7 wheat -> 3 flour (2 each) with 1 wheat left over in storage.
+    expect(outBin.stock.flour).toBe(3);
+    expect(farmBin.stock.wheat ?? 0).toBe(0);
+    expect(ind.storage.wheat).toBe(1);
+    expect(world.state.stats.crafted).toBe(3);
+    const crafter = world.getWorker(ind.crafterId)!;
+    expect(['waiting', 'idle']).toContain(crafter.task);
+    expect(crafter.status).toBe('Waiting for wheat');
+  });
+
+  it('follows the chosen recipe', () => {
+    const { world, ind, outBin } = workshopFarm();
+    ind.storage.wheat = 6;
+    expect(world.setRecipe(ind.id, 'bread').ok).toBe(true);
+    world.assignIndustryWorker(ind.id, 'crafter');
+    advance(world, 2 * RECIPES.bread.craftSeconds + 30);
+    expect(outBin.stock.bread).toBe(2);
+    expect(outBin.stock.flour).toBeUndefined();
+  });
+
+  it('farmers never deliver into a workshop bin', () => {
+    const { world, plot, farmBin, outBin } = workshopFarm();
+    world.assignWorker(plot.id);
+    advance(world, cycleSeconds + 8);
+    expect(farmBin.stock.wheat).toBe(1);
+    expect(outBin.stock.wheat).toBeUndefined();
+  });
+
+  it('returns inputs to storage when the crafter is sent home mid-craft', () => {
+    const { world, ind } = workshopFarm();
+    ind.storage.wheat = 2;
+    world.assignIndustryWorker(ind.id, 'crafter');
+    advance(world, 8);
+    expect(ind.crafting).toBe('flour');
+    expect(ind.storage.wheat).toBe(0);
+    expect(world.unassignIndustryWorker(ind.id, 'crafter').ok).toBe(true);
+    expect(ind.crafting).toBeNull();
+    expect(ind.storage.wheat).toBe(2);
   });
 });
 
@@ -212,6 +297,24 @@ describe('save & offline progress', () => {
   it('caps offline time', () => {
     const world = new World();
     expect(catchUp(world, 10 * 24 * 3600).seconds).toBe(CONFIG.sim.maxOfflineSeconds);
+  });
+
+  it('upgrades saves from before workshops existed', () => {
+    const { world, plot } = starterFarm();
+    world.assignWorker(plot.id);
+    const old = JSON.parse(JSON.stringify(world.state));
+    delete old.stats;
+    for (const w of old.workers) {
+      delete w.industryId;
+      delete w.role;
+      delete w.status;
+      w.carrying = { crop: 'wheat', amount: 1 };
+    }
+    const storage = memoryStorage();
+    storage.setItem(CONFIG.saveKey, JSON.stringify(old));
+    const loaded = loadWorld(storage)!;
+    expect(loaded.state.stats).toEqual({ harvested: 0, crafted: 0 });
+    expect(loaded.state.workers[0]).toMatchObject({ industryId: null, role: null, carrying: { item: 'wheat', amount: 1 } });
   });
 
   it('rejects corrupt saves', () => {

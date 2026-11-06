@@ -1,8 +1,8 @@
 import * as Phaser from 'phaser';
-import { CONFIG, CROPS } from '../config';
-import { taskProgress } from '../sim/simulate';
-import type { BinBuilding, Building, HouseBuilding, PlotBuilding, Worker } from '../sim/types';
-import type { World } from '../sim/world';
+import { CONFIG, CROPS, ITEMS, type ItemId } from '../config';
+import { benchSpot, storageSpot, taskProgress } from '../sim/simulate';
+import type { BinBuilding, Building, HouseBuilding, IndustryBuilding, PlotBuilding, Worker } from '../sim/types';
+import { footprintCells, stockCount, type World } from '../sim/world';
 import type { GameController } from './controller';
 
 const T = CONFIG.grid.tileSize;
@@ -29,6 +29,17 @@ const COLORS = {
   crate: 0xcb9e6c,
   crateDark: 0xa97d4f,
   worker: 0x5677b8,
+  crafter: 0x9a6fc0,
+  hauler: 0xe0954f,
+  floor: 0xe8d2a6,
+  plank: 0xd4b98a,
+  wallWood: 0xa97d4f,
+  bench: 0x8f633d,
+  stone: 0xb9b4ad,
+  stoneDark: 0x8f8a84,
+  oven: 0xc4694f,
+  ovenDark: 0x8a4434,
+  pallet: 0xc9a46f,
   workerBlocked: 0xc96a5f,
   shadow: 0x000000,
   barBg: 0x3d3a35,
@@ -43,6 +54,7 @@ const TASK_COLORS: Record<string, number> = {
   planting: 0x6dbb5b,
   tending: 0x9be08a,
   harvesting: 0xf2cf63,
+  crafting: 0x9a6fc0,
 };
 
 type Gesture = 'none' | 'pending' | 'pan' | 'paint' | 'pinch';
@@ -50,7 +62,8 @@ type Gesture = 'none' | 'pending' | 'pan' | 'paint' | 'pinch';
 export class FarmScene extends Phaser.Scene {
   private g!: Phaser.GameObjects.Graphics;
   private bg!: Phaser.GameObjects.Graphics;
-  private binLabels = new Map<number, Phaser.GameObjects.Text>();
+  private labels = new Map<string, Phaser.GameObjects.Text>();
+  private seenLabels = new Set<string>();
   private downs = new Map<number, { x: number; y: number; sx: number; sy: number }>();
   private gesture: Gesture = 'none';
   private pinchDist = 0;
@@ -243,7 +256,7 @@ export class FarmScene extends Phaser.Scene {
     }
   }
 
-  private anchorFor(tool: 'plot' | 'path' | 'house' | 'bin', cell: { x: number; y: number }): { x: number; y: number } {
+  private anchorFor(tool: 'plot' | 'path' | 'house' | 'bin' | 'industry', cell: { x: number; y: number }): { x: number; y: number } {
     const off = Math.floor(CONFIG.footprints[tool] / 2);
     return { x: cell.x - off, y: cell.y - off };
   }
@@ -276,22 +289,23 @@ export class FarmScene extends Phaser.Scene {
     const g = this.g;
     g.clear();
     const world = this.world;
-    const seenBins = new Set<number>();
+    this.seenLabels.clear();
 
     for (const b of world.state.buildings) if (b.type === 'path') this.drawPath(b);
     for (const b of world.state.buildings) {
       if (b.type === 'plot') this.drawPlot(b);
       else if (b.type === 'house') this.drawHouse(b);
-      else if (b.type === 'bin') {
-        this.drawBin(b);
-        seenBins.add(b.id);
+      else if (b.type === 'industry') this.drawIndustry(b);
+      else if (b.type === 'bin') this.drawBin(b);
+      const attachedBin = b.type === 'bin' && b.industryId != null;
+      if ((b.type === 'plot' || b.type === 'bin' || b.type === 'industry') && !attachedBin && !world.connected.has(b.id)) {
+        this.drawWarning(b);
       }
-      if ((b.type === 'plot' || b.type === 'bin') && !world.connected.has(b.id)) this.drawWarning(b);
     }
-    for (const [id, label] of this.binLabels) {
-      if (!seenBins.has(id)) {
+    for (const [key, label] of this.labels) {
+      if (!this.seenLabels.has(key)) {
         label.destroy();
-        this.binLabels.delete(id);
+        this.labels.delete(key);
       }
     }
 
@@ -385,7 +399,7 @@ export class FarmScene extends Phaser.Scene {
     const g = this.g;
     const x = b.x * T;
     const y = b.y * T;
-    const total = Object.values(b.stock).reduce((s, n) => s + (n ?? 0), 0);
+    const total = stockCount(b.stock);
     g.fillStyle(COLORS.shadow, 0.12);
     g.fillRoundedRect(x + 6, y + 10, T - 8, T - 10, 6);
     g.fillStyle(COLORS.crate, 1);
@@ -394,20 +408,110 @@ export class FarmScene extends Phaser.Scene {
     g.lineBetween(x + 7, y + 22, x + T - 7, y + 22);
     g.lineBetween(x + 7, y + 32, x + T - 7, y + 32);
     if (total > 0) {
-      g.fillStyle(COLORS.wheat, 1);
+      const top = topItem(b.stock);
+      g.fillStyle(ITEMS[top].color, 1);
+      g.lineStyle(1.5, 0x000000, 0.15);
       g.fillCircle(x + T / 2 - 7, y + 12, 6);
+      g.strokeCircle(x + T / 2 - 7, y + 12, 6);
       g.fillCircle(x + T / 2 + 6, y + 11, 7);
+      g.strokeCircle(x + T / 2 + 6, y + 11, 7);
+    }
+    this.label(`bin${b.id}`, String(total), x + T / 2, y + 38);
+  }
+
+  private drawIndustry(b: IndustryBuilding): void {
+    const g = this.g;
+    const x = b.x * T;
+    const y = b.y * T;
+    const w = b.w * T;
+    const h = b.h * T;
+
+    // Chute joining the workshop to its attached output bin.
+    const bin = this.world.getBin(b.binId);
+    if (bin) {
+      g.fillStyle(COLORS.wallWood, 1);
+      g.fillRect(x + w - 6, bin.y * T + 18, bin.x * T - (x + w) + 14, 12);
+      g.fillStyle(COLORS.plank, 1);
+      g.fillRect(x + w - 6, bin.y * T + 20, bin.x * T - (x + w) + 14, 8);
     }
 
-    let label = this.binLabels.get(b.id);
+    g.fillStyle(COLORS.shadow, 0.12);
+    g.fillEllipse(x + w / 2, y + h - 4, w - 8, 14);
+    g.fillStyle(COLORS.wallWood, 1);
+    g.fillRoundedRect(x + 2, y + 2, w - 4, h - 4, 10);
+    g.fillStyle(COLORS.floor, 1);
+    g.fillRoundedRect(x + 7, y + 7, w - 14, h - 14, 7);
+    g.lineStyle(1.5, COLORS.plank, 1);
+    for (let i = 1; i < 6; i++) g.lineBetween(x + 9, y + 7 + (i * (h - 14)) / 6, x + w - 9, y + 7 + (i * (h - 14)) / 6);
+    // Doorway gap on the front wall.
+    g.fillStyle(COLORS.floor, 1);
+    g.fillRect(x + w / 2 - 10, y + h - 8, 20, 6);
+
+    // Storage section: a pallet with stacked sacks of raw goods.
+    const s = storageSpot(b);
+    const sx = s.x * T;
+    const sy = s.y * T;
+    g.fillStyle(COLORS.pallet, 1);
+    g.fillRoundedRect(sx - 18, sy - 14, 36, 30, 4);
+    g.lineStyle(1.5, COLORS.crateDark, 0.8);
+    g.lineBetween(sx - 18, sy - 4, sx + 18, sy - 4);
+    g.lineBetween(sx - 18, sy + 6, sx + 18, sy + 6);
+    const stored = stockCount(b.storage);
+    const sacks = Math.min(9, Math.ceil((stored / CONFIG.industry.storageCapacity) * 9));
+    for (let i = 0; i < sacks; i++) {
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      g.fillStyle(COLORS.wheatDark, 1);
+      g.fillCircle(sx - 10 + col * 10, sy + 8 - row * 9, 5.5);
+      g.fillStyle(COLORS.wheat, 1);
+      g.fillCircle(sx - 10 + col * 10, sy + 7 - row * 9, 4);
+    }
+    this.label(`ind${b.id}s`, `${stored}/${CONFIG.industry.storageCapacity}`, sx, sy + 24, '11px');
+
+    // Workbench with a recipe-specific station.
+    const p = benchSpot(b);
+    const bx = p.x * T;
+    const by = p.y * T;
+    g.fillStyle(COLORS.bench, 1);
+    g.fillRoundedRect(bx - 20, by - 18, 40, 18, 4);
+    const station = b.crafting ?? b.recipe;
+    if (station === 'flour') {
+      g.fillStyle(COLORS.stoneDark, 1);
+      g.fillCircle(bx, by - 12, 11);
+      g.fillStyle(COLORS.stone, 1);
+      g.fillCircle(bx, by - 13, 9);
+      g.fillStyle(COLORS.stoneDark, 1);
+      g.fillCircle(bx, by - 13, 2.5);
+    } else {
+      g.fillStyle(COLORS.ovenDark, 1);
+      g.fillRoundedRect(bx - 13, by - 26, 26, 20, { tl: 12, tr: 12, bl: 2, br: 2 });
+      g.fillStyle(COLORS.oven, 1);
+      g.fillRoundedRect(bx - 11, by - 24, 22, 17, { tl: 10, tr: 10, bl: 2, br: 2 });
+      g.fillStyle(b.crafting ? 0xffb347 : 0x3d2b20, 1);
+      g.fillRoundedRect(bx - 5, by - 15, 10, 7, { tl: 4, tr: 4, bl: 0, br: 0 });
+    }
+    if (b.crafting) {
+      // A little puff while working.
+      const t = this.time.now / 400;
+      g.fillStyle(0xffffff, 0.6);
+      g.fillCircle(bx + 8 + Math.sin(t) * 2, by - 30 - (t % 1) * 6, 4);
+    }
+    this.label(`ind${b.id}r`, ITEMS[b.recipe].icon, x + 16, y + 16, '15px');
+  }
+
+  /** Draws (or reuses) a text label for this frame. */
+  private label(key: string, text: string, x: number, y: number, fontSize = '13px'): void {
+    let label = this.labels.get(key);
     if (!label) {
       label = this.add
-        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '13px', color: '#5a3d22', fontStyle: 'bold' })
+        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize, color: '#5a3d22', fontStyle: 'bold' })
         .setOrigin(0.5)
         .setResolution(Math.min(3, window.devicePixelRatio || 1));
-      this.binLabels.set(b.id, label);
+      this.labels.set(key, label);
     }
-    label.setText(String(total)).setPosition(x + T / 2, y + 38);
+    if (label.text !== text) label.setText(text);
+    label.setPosition(x, y);
+    this.seenLabels.add(key);
   }
 
   private drawWarning(b: Building): void {
@@ -430,12 +534,14 @@ export class FarmScene extends Phaser.Scene {
     g.fillEllipse(x, y + 7, 14, 6);
     g.fillStyle(0xffffff, 1);
     g.fillCircle(x, y + bob, 8);
-    g.fillStyle(w.blocked ? COLORS.workerBlocked : COLORS.worker, 1);
+    g.fillStyle(w.blocked ? COLORS.workerBlocked : w.role === 'crafter' ? COLORS.crafter : w.role === 'hauler' ? COLORS.hauler : COLORS.worker, 1);
     g.fillCircle(x, y + bob, 6.5);
 
     if (w.carrying) {
-      g.fillStyle(COLORS.wheat, 1);
+      g.fillStyle(ITEMS[w.carrying.item].color, 1);
+      g.lineStyle(1.5, 0x000000, 0.2);
       g.fillRoundedRect(x + 4, y - 14 + bob, 9, 8, 2);
+      g.strokeRoundedRect(x + 4, y - 14 + bob, 9, 8, 2);
     }
 
     if (w.blocked) {
@@ -463,26 +569,45 @@ export class FarmScene extends Phaser.Scene {
     if (!cell || tool === 'select' || this.gesture === 'pan' || this.gesture === 'pinch') return;
     const g = this.g;
     if (tool === 'demolish') {
-      const b = this.world.buildingAt(cell.x, cell.y);
+      let b = this.world.buildingAt(cell.x, cell.y);
+      if (b?.type === 'bin' && b.industryId != null) b = this.world.getBuilding(b.industryId);
       if (!b) return;
       g.fillStyle(COLORS.ghostBad, 0.35);
-      g.fillRoundedRect(b.x * T, b.y * T, b.w * T, b.h * T, 8);
+      if (b.type === 'industry') for (const c of footprintCells('industry', b.x, b.y)) g.fillRect(c.x * T, c.y * T, T, T);
+      else g.fillRoundedRect(b.x * T, b.y * T, b.w * T, b.h * T, 8);
       return;
     }
     const a = this.anchorFor(tool, cell);
-    const size = CONFIG.footprints[tool];
     const ok = this.world.canPlace(tool, a.x, a.y).ok;
     g.fillStyle(ok ? COLORS.ghostOk : COLORS.ghostBad, 0.35);
-    g.fillRoundedRect(a.x * T, a.y * T, size * T, size * T, 8);
+    if (tool === 'industry') {
+      for (const c of footprintCells(tool, a.x, a.y)) g.fillRect(c.x * T, c.y * T, T, T);
+    } else {
+      const size = CONFIG.footprints[tool];
+      g.fillRoundedRect(a.x * T, a.y * T, size * T, size * T, 8);
+    }
   }
 
   /** Call after the world object is replaced (e.g. reset). */
   refreshWorld(): void {
-    for (const label of this.binLabels.values()) label.destroy();
-    this.binLabels.clear();
+    for (const label of this.labels.values()) label.destroy();
+    this.labels.clear();
     this.drawBackground();
     this.fitCamera(true);
   }
+}
+
+/** The item a bin holds the most of (decides the colour shown on top). */
+function topItem(stock: Partial<Record<ItemId, number>>): ItemId {
+  let best: ItemId = 'wheat';
+  let most = -1;
+  for (const [item, n] of Object.entries(stock)) {
+    if ((n ?? 0) > most) {
+      most = n ?? 0;
+      best = item as ItemId;
+    }
+  }
+  return best;
 }
 
 function hash(n: number): number {

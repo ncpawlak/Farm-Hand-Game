@@ -14,7 +14,17 @@ Built with TypeScript + [Phaser](https://phaser.io), packaged as an installable 
 - **Remove**: demolishing refunds 50%.
 - Progress autosaves to `localStorage` and keeps running while the game is closed (up to 12 hours).
 
-All balance numbers (costs, timings, prices, grid size) live in [`src/config.ts`](src/config.ts).
+## Workshops
+
+- **Workshop** ($300, 2×2) comes with an attached output bin (free, placed to its right). Connect it to a house with paths.
+- Tap the workshop and use the **Makes** dropdown to pick a recipe:
+  - 🥣 **Flour**: 2 wheat → 1 in 6s, sells for $10.
+  - 🍞 **Bread**: 3 wheat → 1 in 10s, sells for $16.
+- **Hauler** (orange): carries up to 5 of the recipe's input from your farm bins into the workshop's storage (max 20).
+- **Crafter** (purple): moves inputs from storage to the workbench, crafts the good, and puts it in the attached bin. Tap the workshop or its bin to sell the output.
+- Farmers never deliver to workshop bins. Removing a workshop (or its bin) sells everything it holds and sends its workers home.
+
+All balance numbers (costs, timings, prices, recipes, grid size) live in [`src/config.ts`](src/config.ts). Crop growth is temporarily set to **5s** for testing (normally 30s).
 
 ## Controls
 
@@ -46,5 +56,5 @@ In dev builds, the game controller is exposed as `window.farm` for debugging.
 
 ## Roadmap
 
-- v2: transport workers carrying product from bins to destinations.
-- Then: more crops, processing buildings that turn products into goods, and real art.
+- Transport workers carrying goods to destinations (markets, orders).
+- More crops and recipes, chained workshops, and real art.

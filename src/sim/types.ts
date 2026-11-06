@@ -1,6 +1,6 @@
-import type { CropId } from '../config';
+import type { CropId, GoodId, ItemId } from '../config';
 
-export type BuildingType = 'plot' | 'path' | 'house' | 'bin';
+export type BuildingType = 'plot' | 'path' | 'house' | 'bin' | 'industry';
 export type PlotStage = 'untilled' | 'tilled' | 'planted' | 'ready';
 
 interface BuildingBase {
@@ -31,23 +31,60 @@ export interface HouseBuilding extends BuildingBase {
 
 export interface BinBuilding extends BuildingBase {
   type: 'bin';
-  stock: Partial<Record<CropId, number>>;
+  stock: Partial<Record<ItemId, number>>;
+  /** Set when this bin is the attached output bin of a workshop. */
+  industryId?: number;
 }
 
-export type Building = PlotBuilding | PathBuilding | HouseBuilding | BinBuilding;
+export interface IndustryBuilding extends BuildingBase {
+  type: 'industry';
+  /** What the workshop is set to make. */
+  recipe: GoodId;
+  /** Raw goods waiting in the storage section. */
+  storage: Partial<Record<CropId, number>>;
+  /** Recipe currently on the workbench (inputs already taken from storage). */
+  crafting: GoodId | null;
+  binId: number;
+  crafterId: number | null;
+  haulerId: number | null;
+}
+
+export type Building = PlotBuilding | PathBuilding | HouseBuilding | BinBuilding | IndustryBuilding;
 
 export interface Point {
   x: number;
   y: number;
 }
 
-export type WorkerTask = 'idle' | 'walking' | 'tilling' | 'planting' | 'tending' | 'harvesting';
-export type WorkerGoal = 'plot' | 'bin' | 'home';
+export type WorkerRole = 'crafter' | 'hauler';
+
+export type WorkerTask =
+  | 'idle'
+  | 'walking'
+  | 'tilling'
+  | 'planting'
+  | 'tending'
+  | 'harvesting'
+  /** Crafter walking to the workshop's storage section. */
+  | 'fetching'
+  /** Crafter moving raw goods from storage to the workbench. */
+  | 'loading'
+  | 'crafting'
+  /** Workshop worker with nothing to do right now. */
+  | 'waiting';
+
+/**
+ * plot/bin/home are farm trips; industry = own workshop, pickup = a farm bin with
+ * the workshop's raw input, outbin = the workshop's attached output bin.
+ */
+export type WorkerGoal = 'plot' | 'bin' | 'home' | 'industry' | 'pickup' | 'outbin';
 
 export interface Worker {
   id: number;
   homeId: number;
   plotId: number | null;
+  industryId: number | null;
+  role: WorkerRole | null;
   /** Position in tile units (0.5, 0.5 is the centre of cell 0,0). */
   x: number;
   y: number;
@@ -57,11 +94,18 @@ export interface Worker {
   route: Point[];
   routeVersion: number;
   taskElapsed: number;
-  carrying: { crop: CropId; amount: number } | null;
+  carrying: { item: ItemId; amount: number } | null;
   wander: Point | null;
   wanderPause: number;
   blocked: string | null;
+  /** Short non-error status, e.g. "Waiting for wheat". */
+  status: string | null;
   retryIn: number;
+}
+
+export interface GameStats {
+  harvested: number;
+  crafted: number;
 }
 
 export interface GameState {
@@ -72,6 +116,7 @@ export interface GameState {
   nextId: number;
   buildings: Building[];
   workers: Worker[];
+  stats: GameStats;
   savedAt: number;
 }
 

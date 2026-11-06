@@ -1,4 +1,4 @@
-import { CONFIG, CROPS } from '../config';
+import { CONFIG, ITEMS, RECIPES, type CropId, type GoodId, type ItemId } from '../config';
 import { computeConnected, type GridLookup } from './pathfinding';
 import type {
   BinBuilding,
@@ -6,9 +6,12 @@ import type {
   BuildingType,
   GameState,
   HouseBuilding,
+  IndustryBuilding,
   PlotBuilding,
+  Point,
   Result,
   Worker,
+  WorkerRole,
 } from './types';
 
 export type PlaceableType = BuildingType;
@@ -25,8 +28,28 @@ export function createNewState(): GameState {
     nextId: 1,
     buildings: [],
     workers: [],
+    stats: { harvested: 0, crafted: 0 },
     savedAt: Date.now(),
   };
+}
+
+/** Cells covered when placing `type` with its top-left at x,y (workshops include their output bin). */
+export function footprintCells(type: PlaceableType, x: number, y: number): Point[] {
+  const size = CONFIG.footprints[type];
+  const cells: Point[] = [];
+  for (let cy = y; cy < y + size; cy++) {
+    for (let cx = x; cx < x + size; cx++) cells.push({ x: cx, y: cy });
+  }
+  if (type === 'industry') {
+    const o = CONFIG.industry.binOffset;
+    cells.push({ x: x + o.x, y: y + o.y });
+  }
+  return cells;
+}
+
+/** A worker with no field or workshop job. */
+export function isIdleWorker(w: Worker): boolean {
+  return w.plotId == null && w.industryId == null;
 }
 
 export class World implements GridLookup {
@@ -66,6 +89,10 @@ export class World implements GridLookup {
       }
     }
     this.connected = computeConnected(this, this.state.buildings);
+    // A workshop's output bin is reached through the workshop itself.
+    for (const b of this.state.buildings) {
+      if (b.type === 'industry' && this.connected.has(b.id)) this.connected.add(b.binId);
+    }
     this.layoutVersion++;
   }
 
@@ -88,6 +115,16 @@ export class World implements GridLookup {
     return b?.type === 'plot' ? b : undefined;
   }
 
+  getIndustry(id: number | null | undefined): IndustryBuilding | undefined {
+    const b = this.getBuilding(id);
+    return b?.type === 'industry' ? b : undefined;
+  }
+
+  getBin(id: number | null | undefined): BinBuilding | undefined {
+    const b = this.getBuilding(id);
+    return b?.type === 'bin' ? b : undefined;
+  }
+
   getWorker(id: number | null | undefined): Worker | undefined {
     return id == null ? undefined : this.state.workers.find((w) => w.id === id);
   }
@@ -99,12 +136,9 @@ export class World implements GridLookup {
   // ---------------------------------------------------------------- building
 
   canPlace(type: PlaceableType, x: number, y: number): Result {
-    const size = CONFIG.footprints[type];
-    for (let cy = y; cy < y + size; cy++) {
-      for (let cx = x; cx < x + size; cx++) {
-        if (!this.inBounds(cx, cy)) return fail('Out of bounds');
-        if (this.buildingAt(cx, cy)) return fail('Space is taken');
-      }
+    for (const c of footprintCells(type, x, y)) {
+      if (!this.inBounds(c.x, c.y)) return fail('Out of bounds');
+      if (this.buildingAt(c.x, c.y)) return fail('Space is taken');
     }
     if (this.state.money < CONFIG.costs[type]) return fail('Not enough money');
     return OK;
@@ -116,19 +150,43 @@ export class World implements GridLookup {
     const size = CONFIG.footprints[type];
     const cost = CONFIG.costs[type];
     const base = { id: this.state.nextId++, x, y, w: size, h: size, cost };
-    let building: Building;
+    this.state.money -= cost;
     switch (type) {
       case 'plot':
-        building = { ...base, type, crop: 'wheat', stage: 'untilled', growElapsed: 0, workerId: null };
+        this.state.buildings.push({ ...base, type, crop: 'wheat', stage: 'untilled', growElapsed: 0, workerId: null });
         break;
       case 'bin':
-        building = { ...base, type, stock: {} };
+        this.state.buildings.push({ ...base, type, stock: {} });
         break;
+      case 'industry': {
+        const o = CONFIG.industry.binOffset;
+        const bin: BinBuilding = {
+          id: this.state.nextId++,
+          type: 'bin',
+          x: x + o.x,
+          y: y + o.y,
+          w: 1,
+          h: 1,
+          cost: 0,
+          stock: {},
+          industryId: base.id,
+        };
+        const industry: IndustryBuilding = {
+          ...base,
+          type,
+          recipe: 'flour',
+          storage: {},
+          crafting: null,
+          binId: bin.id,
+          crafterId: null,
+          haulerId: null,
+        };
+        this.state.buildings.push(industry, bin);
+        break;
+      }
       default:
-        building = { ...base, type };
+        this.state.buildings.push({ ...base, type });
     }
-    this.state.money -= cost;
-    this.state.buildings.push(building);
     this.rebuild();
     if (type === 'plot') this.tryMerge(x, y);
     return OK;
@@ -182,18 +240,33 @@ export class World implements GridLookup {
   demolish(id: number): Result {
     const b = this.getBuilding(id);
     if (!b) return fail('Nothing to demolish');
+    // An attached output bin goes with its workshop.
+    if (b.type === 'bin' && b.industryId != null) return this.demolish(b.industryId);
     if (b.type === 'house') {
       const bedsAfter = this.bedCount() - CONFIG.houseBeds;
       if (this.state.workers.length > bedsAfter) return fail('Workers live here — dismiss some first');
     }
+    const removed = new Set([id]);
     if (b.type === 'plot') {
       const w = this.getWorker(b.workerId);
       if (w) this.releaseWorker(w);
     }
-    if (b.type === 'bin') this.state.money += binValue(b);
+    if (b.type === 'bin') this.state.money += stockValue(b.stock);
+    if (b.type === 'industry') {
+      for (const wid of [b.crafterId, b.haulerId]) {
+        const w = this.getWorker(wid);
+        if (w) this.releaseWorker(w);
+      }
+      this.state.money += stockValue(b.storage);
+      const bin = this.getBin(b.binId);
+      if (bin) {
+        this.state.money += stockValue(bin.stock);
+        removed.add(bin.id);
+      }
+    }
 
     this.state.money += Math.floor(b.cost * CONFIG.demolishRefund);
-    this.state.buildings = this.state.buildings.filter((other) => other.id !== id);
+    this.state.buildings = this.state.buildings.filter((other) => !removed.has(other.id));
     this.rebuild();
     if (b.type === 'house') this.rehomeWorkers(b);
     return OK;
@@ -221,23 +294,58 @@ export class World implements GridLookup {
     return undefined;
   }
 
+  setRecipe(industryId: number, recipe: GoodId): Result {
+    const ind = this.getIndustry(industryId);
+    if (!ind) return fail('Not a workshop');
+    if (!RECIPES[recipe]) return fail('Unknown recipe');
+    ind.recipe = recipe;
+    return OK;
+  }
+
   // ----------------------------------------------------------------- workers
+
+  /** An idle worker, hiring a new one if nobody is free. */
+  private obtainWorker(): { ok: true; worker: Worker } | { ok: false; reason: string } {
+    const idle = this.state.workers.find(isIdleWorker);
+    if (idle) return { ok: true, worker: idle };
+    return this.hireWorker();
+  }
 
   /** Assigns an unassigned worker to the plot, hiring a new one if needed. */
   assignWorker(plotId: number): Result {
     const plot = this.getPlot(plotId);
     if (!plot) return fail('Not a farm plot');
     if (plot.workerId != null) return fail('Plot already has a worker');
-
-    let worker = this.state.workers.find((w) => w.plotId == null);
-    if (!worker) {
-      const hired = this.hireWorker();
-      if (!hired.ok) return hired;
-      worker = hired.worker;
-    }
+    const got = this.obtainWorker();
+    if (!got.ok) return got;
+    const worker = got.worker;
     worker.plotId = plot.id;
     plot.workerId = worker.id;
     if (worker.task === 'walking' && worker.goal === 'home') worker.task = 'idle';
+    return OK;
+  }
+
+  /** Staffs a workshop's crafter or hauler slot, hiring if needed. */
+  assignIndustryWorker(industryId: number, role: WorkerRole): Result {
+    const ind = this.getIndustry(industryId);
+    if (!ind) return fail('Not a workshop');
+    const slot = role === 'crafter' ? 'crafterId' : 'haulerId';
+    if (ind[slot] != null) return fail(`Workshop already has a ${role}`);
+    const got = this.obtainWorker();
+    if (!got.ok) return got;
+    const worker = got.worker;
+    worker.industryId = ind.id;
+    worker.role = role;
+    ind[slot] = worker.id;
+    if (worker.task === 'walking' && worker.goal === 'home') worker.task = 'idle';
+    return OK;
+  }
+
+  unassignIndustryWorker(industryId: number, role: WorkerRole): Result {
+    const ind = this.getIndustry(industryId);
+    const w = this.getWorker(role === 'crafter' ? ind?.crafterId : ind?.haulerId);
+    if (!ind || !w) return fail(`No ${role} at this workshop`);
+    this.releaseWorker(w);
     return OK;
   }
 
@@ -252,6 +360,8 @@ export class World implements GridLookup {
       id: this.state.nextId++,
       homeId: home.id,
       plotId: null,
+      industryId: null,
+      role: null,
       x: home.x + home.w / 2,
       y: home.y + home.h / 2,
       inside: true,
@@ -264,6 +374,7 @@ export class World implements GridLookup {
       wander: null,
       wanderPause: 0,
       blocked: null,
+      status: null,
       retryIn: 0,
     };
     this.state.workers.push(worker);
@@ -278,13 +389,35 @@ export class World implements GridLookup {
     return OK;
   }
 
-  /** Detaches a worker from its plot; it finishes any delivery then walks home. */
+  /** Detaches a worker from its job; it finishes any delivery then walks home. */
   private releaseWorker(w: Worker): void {
     const plot = this.getPlot(w.plotId);
     if (plot) plot.workerId = null;
+    const ind = this.getIndustry(w.industryId);
+    if (ind) {
+      if (ind.crafterId === w.id) {
+        ind.crafterId = null;
+        // Put anything not yet crafted back into storage.
+        if (ind.crafting) {
+          const r = RECIPES[ind.crafting];
+          ind.storage[r.input] = (ind.storage[r.input] ?? 0) + r.inputAmount;
+          ind.crafting = null;
+        }
+        if (w.carrying && w.task === 'loading') {
+          const item = w.carrying.item as CropId;
+          ind.storage[item] = (ind.storage[item] ?? 0) + w.carrying.amount;
+          w.carrying = null;
+        }
+      }
+      if (ind.haulerId === w.id) ind.haulerId = null;
+    }
     w.plotId = null;
+    w.industryId = null;
+    w.role = null;
+    w.status = null;
     if (!(w.task === 'walking' && w.goal === 'bin')) {
       w.task = 'idle';
+      w.goal = null;
       w.blocked = null;
       w.retryIn = 0;
     }
@@ -292,7 +425,7 @@ export class World implements GridLookup {
 
   /** Dismisses an unassigned worker (no refund). */
   dismissIdleWorker(houseId: number): Result {
-    const w = this.state.workers.find((wk) => wk.homeId === houseId && wk.plotId == null && !wk.carrying);
+    const w = this.state.workers.find((wk) => wk.homeId === houseId && isIdleWorker(wk) && !wk.carrying);
     if (!w) return fail('No idle workers here');
     this.state.workers = this.state.workers.filter((wk) => wk.id !== w.id);
     return OK;
@@ -301,9 +434,9 @@ export class World implements GridLookup {
   // -------------------------------------------------------------------- bins
 
   sellBin(binId: number): { ok: true; earned: number } | { ok: false; reason: string } {
-    const bin = this.getBuilding(binId);
-    if (bin?.type !== 'bin') return { ok: false, reason: 'Not an output bin' };
-    const earned = binValue(bin);
+    const bin = this.getBin(binId);
+    if (!bin) return { ok: false, reason: 'Not an output bin' };
+    const earned = stockValue(bin.stock);
     if (earned === 0) return { ok: false, reason: 'Bin is empty' };
     this.state.money += earned;
     bin.stock = {};
@@ -319,10 +452,18 @@ export class World implements GridLookup {
   }
 }
 
-export function binValue(bin: BinBuilding): number {
+export function stockValue(stock: Partial<Record<ItemId, number>>): number {
   let value = 0;
-  for (const [crop, amount] of Object.entries(bin.stock)) {
-    value += (amount ?? 0) * CROPS[crop as keyof typeof CROPS].sellPrice;
+  for (const [item, amount] of Object.entries(stock)) {
+    value += (amount ?? 0) * ITEMS[item as ItemId].sellPrice;
   }
   return value;
+}
+
+export function binValue(bin: BinBuilding): number {
+  return stockValue(bin.stock);
+}
+
+export function stockCount(stock: Partial<Record<ItemId, number>>): number {
+  return Object.values(stock).reduce((s: number, n) => s + (n ?? 0), 0);
 }
